@@ -21,8 +21,8 @@ log = logging.getLogger(__name__)
 def load_config():
     """Load configuration from .env file."""
     config = {
-        "WHISPER_ENDPOINT": "http://api.local.samfenwick.com/v1/audio/transcriptions",
-        "WHISPER_MODEL": "whisper-large-v3-turbo",
+        "WHISPER_ENDPOINT": "",
+        "WHISPER_MODEL": "",
         "WHISPER_API_KEY": "",
         "PORT": "8000",
         "HOST": "0.0.0.0",
