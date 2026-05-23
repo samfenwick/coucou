@@ -888,6 +888,7 @@ async def main():
     config = load_config()
     host = config["HOST"]
     port = int(config["PORT"])
+    admin_host = config.get("ADMIN_HOST", "127.0.0.1")
     admin_port = int(config.get("ADMIN_PORT", "8001"))
     pipeline["loop"] = asyncio.get_running_loop()
 
@@ -910,12 +911,12 @@ async def main():
     ) as viewer_server:
         async with serve(
             handle_admin_websocket,
-            "127.0.0.1",
+            admin_host,
             admin_port,
             process_request=handle_http_admin,
         ) as admin_server:
             log.info(f"Viewer server running at http://{host}:{port}")
-            log.info(f"Admin server running at http://127.0.0.1:{admin_port}")
+            log.info(f"Admin server running at http://{admin_host}:{admin_port}")
             await asyncio.gather(
                 asyncio.Future(),
                 broadcast_audio(),
