@@ -5,48 +5,60 @@ const $ = (sel) => document.querySelector(sel);
 const state = {
     ws: null,
     capturing: false,
-    syncOffset: 0,
+    audioDelay: 6000, // ms — server-side audio buffer delay
     audioCtx: null,
     nextPlayTime: 0,
     volume: 0.8,
     reconnectDelay: 1000,
 };
 
-// --- Audio Context + WAV Decoding ---
+// --- Audio output device picker ---
 
-function ensureAudioContext() {
-    if (!state.audioCtx) {
-        state.audioCtx = new AudioContext({ sampleRate: 16000 });
+async function loadOutputDevices() {
+    const select = $("#output-select");
+
+    // Need mic permission to see device labels
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(t => t.stop());
+    } catch (e) {
+        // If denied, labels will be empty
     }
-    if (state.audioCtx.state === "suspended") {
-        state.audioCtx.resume();
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const outputs = devices.filter(d => d.kind === "audiooutput" && !d.label.includes("BlackHole"));
+
+    select.innerHTML = '<option value="">Select speakers...</option>';
+    for (const d of outputs) {
+        const opt = document.createElement("option");
+        opt.value = d.deviceId;
+        opt.textContent = d.label || d.deviceId;
+        select.appendChild(opt);
     }
-    return state.audioCtx;
 }
 
-async function routeAudioToDevice(deviceName) {
-    // Route web app audio to the real speakers (not BlackHole)
-    // so the user hears our buffered playback while system output is BlackHole
+async function routeToSelectedOutput() {
     const ctx = state.audioCtx;
-    if (!ctx || !ctx.setSinkId) return;
+    const deviceId = $("#output-select").value;
+    if (!ctx || !ctx.setSinkId || !deviceId) return;
 
     try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const outputDevices = devices.filter(d => d.kind === "audiooutput");
-        const target = outputDevices.find(d => d.label.includes(deviceName));
-        if (target) {
-            await ctx.setSinkId(target.deviceId);
-            console.log(`Audio output routed to: ${target.label}`);
-        } else {
-            console.warn(`Output device "${deviceName}" not found, using default`);
-        }
+        await ctx.setSinkId(deviceId);
+        console.log("Audio routed to:", $("#output-select").selectedOptions[0]?.textContent);
     } catch (err) {
         console.warn("setSinkId failed:", err);
     }
 }
 
+// --- Audio playback ---
+
 async function playAudioChunk(wavBytes) {
-    const ctx = ensureAudioContext();
+    const ctx = state.audioCtx;
+    if (!ctx || ctx.state === "closed") return;
+
+    if (ctx.state === "suspended") {
+        await ctx.resume();
+    }
 
     try {
         const audioBuffer = await ctx.decodeAudioData(wavBytes.buffer.slice(0));
@@ -95,9 +107,8 @@ function scheduleWordHighlighting(words) {
         const start = parseFloat(wordEl.dataset.start);
         const end = parseFloat(wordEl.dataset.end);
 
-        const offsetSec = state.syncOffset / 1000;
-        const highlightAt = (start + offsetSec) - baseTime;
-        const unhighlightAt = (end + offsetSec) - baseTime;
+        const highlightAt = start - baseTime;
+        const unhighlightAt = end - baseTime;
 
         if (highlightAt > 0) {
             setTimeout(() => wordEl.classList.add("active"), highlightAt * 1000);
@@ -158,11 +169,6 @@ function handleStatus(data) {
         $("#start-stop").textContent = "Stop";
         $("#subtitle-text").textContent = "Listening...";
         $("#subtitle-text").classList.add("inactive");
-
-        // Route audio to real speakers (system output is now BlackHole)
-        if (data.outputDevice) {
-            routeAudioToDevice(data.outputDevice);
-        }
     } else if (data.status === "stopped") {
         state.capturing = false;
         $("#start-stop").textContent = "Start";
@@ -173,13 +179,27 @@ function handleStatus(data) {
 
 // --- Controls ---
 
-$("#start-stop").addEventListener("click", () => {
+$("#start-stop").addEventListener("click", async () => {
     if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
 
     if (state.capturing) {
         state.ws.send(JSON.stringify({ type: "stop" }));
     } else {
-        ensureAudioContext();
+        const outputDevice = $("#output-select").value;
+        if (!outputDevice) {
+            alert("Select a speaker output first");
+            return;
+        }
+
+        // Create AudioContext on user gesture
+        if (!state.audioCtx) {
+            state.audioCtx = new AudioContext({ sampleRate: 48000 });
+        }
+        await state.audioCtx.resume();
+
+        // Route to selected speakers before capture starts
+        await routeToSelectedOutput();
+
         state.ws.send(JSON.stringify({ type: "start" }));
     }
 });
@@ -188,9 +208,47 @@ $("#volume").addEventListener("input", (e) => {
     state.volume = parseInt(e.target.value, 10) / 100;
 });
 
+function updateSyncDisplay() {
+    const secs = (state.audioDelay / 1000).toFixed(1);
+    $("#sync-offset-label").textContent = `${secs}s`;
+    $("#sync-offset").value = state.audioDelay;
+}
+
+function sendSyncToServer() {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({ type: "sync", delay: state.audioDelay / 1000 }));
+    }
+}
+
 $("#sync-offset").addEventListener("input", (e) => {
-    state.syncOffset = parseInt(e.target.value, 10);
-    $("#sync-offset-label").textContent = `${state.syncOffset}ms`;
+    state.audioDelay = parseInt(e.target.value, 10);
+    updateSyncDisplay();
+    sendSyncToServer();
+});
+
+$("#sync-reset").addEventListener("click", () => {
+    state.audioDelay = 6000;
+    updateSyncDisplay();
+    sendSyncToServer();
+});
+
+$("#sync-minus").addEventListener("click", () => {
+    state.audioDelay = Math.max(0, state.audioDelay - 100);
+    updateSyncDisplay();
+    sendSyncToServer();
+});
+
+$("#sync-plus").addEventListener("click", () => {
+    state.audioDelay = Math.min(10000, state.audioDelay + 100);
+    updateSyncDisplay();
+    sendSyncToServer();
+});
+
+$("#refresh-outputs").addEventListener("click", loadOutputDevices);
+
+// Also re-route when output device is changed mid-session
+$("#output-select").addEventListener("change", () => {
+    if (state.audioCtx) routeToSelectedOutput();
 });
 
 // --- Wake Lock (prevent screen sleep on mobile) ---

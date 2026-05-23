@@ -14,8 +14,12 @@ from whisper_client import WhisperClient
 from encoder import AudioEncoder
 from audio_capture import AudioCapture
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log_level = os.environ.get("LOGLEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, log_level, logging.INFO), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger(__name__)
+
+logging.getLogger("websockets").setLevel(logging.CRITICAL)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def load_config():
@@ -86,11 +90,13 @@ async def handle_http(connection, request):
 
 
 connected_clients = set()
+active_clients = set()  # clients that have hit Start
 
 # --- Pipeline state ---
 pipeline = {
     "running": False,
-    "ring_buffer": None,
+    "playback_buffer": None,  # 48kHz for audio streaming
+    "whisper_buffer": None,   # 16kHz for transcription
     "audio_capture": None,
     "whisper_client": None,
     "audio_encoder": None,
@@ -98,6 +104,7 @@ pipeline = {
     "whisper_thread": None,
     "loop": None,
     "original_output_device": None,
+    "audio_delay": 6.0,
 }
 
 
@@ -108,23 +115,23 @@ def _enqueue_subtitle(item):
         loop.call_soon_threadsafe(pipeline["subtitle_queue"].put_nowait, item)
 
 
-def whisper_thread_fn(ring_buffer, whisper_client, config):
+def whisper_thread_fn(whisper_buffer, whisper_client, config):
     """Pull overlapping chunks from ring buffer and transcribe."""
     log.info("Whisper thread started")
     chunk_samples = int(config["CHUNK_SECONDS"]) * 16000
     overlap_samples = int(config["OVERLAP_SECONDS"]) * 16000
     step_samples = chunk_samples - overlap_samples
-    next_position = ring_buffer.write_position
+    next_position = whisper_buffer.write_position
 
     try:
         while pipeline["running"]:
-            if ring_buffer.write_position < next_position + chunk_samples:
+            if whisper_buffer.write_position < next_position + chunk_samples:
                 time.sleep(0.1)
                 continue
 
-            chunk = ring_buffer.read_at(next_position, chunk_samples)
+            chunk = whisper_buffer.read_at(next_position, chunk_samples)
             if chunk is None:
-                next_position = max(0, ring_buffer.write_position - chunk_samples)
+                next_position = max(0, whisper_buffer.write_position - chunk_samples)
                 continue
 
             chunk_offset = next_position / 16000.0
@@ -166,10 +173,12 @@ def start_pipeline(config):
         return None
 
     buffer_seconds = int(config["BUFFER_SECONDS"])
-    ring_buffer = RingBuffer(buffer_seconds=buffer_seconds, sample_rate=16000)
-    pipeline["ring_buffer"] = ring_buffer
+    playback_buffer = RingBuffer(buffer_seconds=buffer_seconds, sample_rate=48000)
+    whisper_buffer = RingBuffer(buffer_seconds=buffer_seconds, sample_rate=16000)
+    pipeline["playback_buffer"] = playback_buffer
+    pipeline["whisper_buffer"] = whisper_buffer
 
-    capture = AudioCapture(ring_buffer, sample_rate=16000)
+    capture = AudioCapture(playback_buffer, whisper_buffer)
     original_device = capture.start()
     pipeline["audio_capture"] = capture
     pipeline["original_output_device"] = original_device
@@ -180,12 +189,12 @@ def start_pipeline(config):
         api_key=config.get("WHISPER_API_KEY") or None,
     )
 
-    pipeline["audio_encoder"] = AudioEncoder(sample_rate=16000, channels=1)
+    pipeline["audio_encoder"] = AudioEncoder(sample_rate=48000, channels=1)
 
     pipeline["running"] = True
 
     pipeline["whisper_thread"] = threading.Thread(
-        target=whisper_thread_fn, args=(ring_buffer, pipeline["whisper_client"], config), daemon=True
+        target=whisper_thread_fn, args=(whisper_buffer, pipeline["whisper_client"], config), daemon=True
     )
     pipeline["whisper_thread"].start()
 
@@ -205,7 +214,8 @@ def stop_pipeline():
         pipeline["whisper_thread"].join(timeout=5)
         pipeline["whisper_thread"] = None
 
-    pipeline["ring_buffer"] = None
+    pipeline["playback_buffer"] = None
+    pipeline["whisper_buffer"] = None
     pipeline["whisper_client"] = None
     pipeline["audio_encoder"] = None
     pipeline["original_output_device"] = None
@@ -218,29 +228,49 @@ async def broadcast_audio():
     while not pipeline["running"]:
         await asyncio.sleep(0.1)
 
-    ring_buffer = pipeline["ring_buffer"]
+    playback_buffer = pipeline["playback_buffer"]
     encoder = pipeline["audio_encoder"]
 
-    await asyncio.sleep(float(load_config()["CHUNK_SECONDS"]) + 1)
+    # Wait for initial buffer to fill
+    delay_samples = int(pipeline["audio_delay"] * 48000)
+    while pipeline["running"]:
+        if playback_buffer.write_position >= delay_samples:
+            break
+        await asyncio.sleep(0.1)
 
-    reader = ring_buffer.create_reader()
+    # 200ms chunks at 48kHz = 9600 samples
+    chunk_size = 9600
+    read_position = 0
 
     while pipeline["running"]:
-        samples = reader.read(3200, block=False)
-        if samples is None:
+        # Target position: audio_delay seconds behind live
+        target_position = playback_buffer.write_position - int(pipeline["audio_delay"] * 48000)
+        if target_position < 0:
+            await asyncio.sleep(0.05)
+            continue
+
+        # Advance read position toward target, but don't skip ahead
+        if read_position == 0:
+            read_position = target_position
+
+        chunk = playback_buffer.read_at(read_position, chunk_size)
+        if chunk is None:
             await asyncio.sleep(0.01)
             continue
 
+        read_position += chunk_size
+
         try:
-            wav_chunk = encoder.encode_wav_chunk(samples)
-            if connected_clients:
+            wav_chunk = encoder.encode_wav_chunk(chunk)
+            if active_clients:
                 await asyncio.gather(
-                    *[client.send(wav_chunk) for client in connected_clients],
+                    *[client.send(wav_chunk) for client in active_clients],
                     return_exceptions=True,
                 )
         except Exception as e:
             log.warning(f"Broadcast error: {e}")
 
+        # 200ms of audio at 48kHz
         await asyncio.sleep(0.19)
 
 
@@ -251,10 +281,10 @@ async def broadcast_subtitles():
             subtitle = await asyncio.wait_for(
                 pipeline["subtitle_queue"].get(), timeout=0.5
             )
-            if connected_clients:
+            if active_clients:
                 msg = json.dumps(subtitle)
                 await asyncio.gather(
-                    *[client.send(msg) for client in connected_clients],
+                    *[client.send(msg) for client in active_clients],
                     return_exceptions=True,
                 )
         except asyncio.TimeoutError:
@@ -271,6 +301,7 @@ async def handle_websocket(websocket):
         async for message in websocket:
             data = json.loads(message)
             if data.get("type") == "start":
+                active_clients.add(websocket)
                 config = load_config()
                 original_device = start_pipeline(config)
                 await websocket.send(json.dumps({
@@ -279,13 +310,20 @@ async def handle_websocket(websocket):
                     "outputDevice": original_device,
                 }))
             elif data.get("type") == "stop":
+                active_clients.discard(websocket)
                 stop_pipeline()
                 await websocket.send(json.dumps({"type": "status", "status": "stopped"}))
+            elif data.get("type") == "sync":
+                pipeline["audio_delay"] = float(data.get("delay", 6.0))
+                log.info(f"Audio delay set to {pipeline['audio_delay']}s")
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
         connected_clients.discard(websocket)
+        active_clients.discard(websocket)
         log.info(f"Client disconnected ({len(connected_clients)} total)")
+        if not active_clients and pipeline["running"]:
+            stop_pipeline()
 
 
 async def main():

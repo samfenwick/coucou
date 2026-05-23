@@ -13,16 +13,33 @@
         </header>
         <div id="controls">
             <div class="control-group">
+                <label for="output-select">Speaker Output</label>
+                <select id="output-select">
+                    <option value="">Select speakers...</option>
+                </select>
+                <button id="refresh-outputs" title="Refresh">&#x21bb;</button>
+            </div>
+            <div class="control-group">
                 <button id="start-stop">Start</button>
             </div>
             <div class="control-group">
                 <label for="volume">Volume</label>
                 <input type="range" id="volume" min="0" max="100" value="80">
             </div>
-            <div class="control-group">
-                <label for="sync-offset">Sync Offset</label>
-                <input type="range" id="sync-offset" min="-2000" max="2000" value="0" step="50">
-                <span id="sync-offset-label">0ms</span>
+            <div class="control-group sync-control">
+                <label for="sync-offset">Sync</label>
+                <div class="sync-slider-row">
+                    <button class="sync-nudge" id="sync-minus" title="-0.1s">-</button>
+                    <span class="sync-hint">sooner</span>
+                    <input type="range" id="sync-offset" min="0" max="10000" value="6000" step="100">
+                    <span class="sync-hint">later</span>
+                    <button class="sync-nudge" id="sync-plus" title="+0.1s">+</button>
+                </div>
+                <div class="sync-value-row">
+                    <span id="sync-offset-label" class="sync-value">6.0s</span>
+                    <button id="sync-reset" class="sync-reset" title="Reset to 0">reset</button>
+                </div>
+                <p class="sync-help">Controls audio delay — increase until audio matches subtitles</p>
             </div>
         </div>
         <div id="subtitle-area">

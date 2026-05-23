@@ -14,9 +14,17 @@ select, button, input[type="range"] { font-family: inherit; }
 select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.75rem; font-size: 0.9rem; min-width: 180px; }
 button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 0.5rem 1.25rem; font-size: 0.9rem; cursor: pointer; font-weight: 500; }
 button:hover { opacity: 0.9; }
-#refresh-sources { background: var(--bg); border: 1px solid var(--border); padding: 0.5rem; font-size: 1rem; min-width: auto; }
+#refresh-outputs { background: var(--bg); border: 1px solid var(--border); padding: 0.5rem; font-size: 1rem; min-width: auto; }
 input[type="range"] { width: 120px; accent-color: var(--accent); }
-#sync-offset-label { font-size: 0.8rem; color: var(--text-dim); min-width: 50px; }
+.sync-control { flex-direction: column; align-items: stretch; gap: 0.4rem; width: 100%; }
+.sync-slider-row { display: flex; align-items: center; gap: 0.4rem; }
+.sync-slider-row input[type="range"] { flex: 1; }
+.sync-hint { font-size: 0.65rem; color: var(--text-dim); font-style: italic; white-space: nowrap; }
+.sync-value-row { display: flex; align-items: center; justify-content: center; gap: 0.5rem; }
+.sync-value { font-size: 0.9rem; color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; }
+.sync-reset { background: var(--bg); border: 1px solid var(--border); padding: 0.2rem 0.6rem; font-size: 0.7rem; min-width: auto; color: var(--text-dim); border-radius: 4px; }
+.sync-nudge { background: var(--bg); border: 1px solid var(--border); padding: 0.2rem 0.5rem; font-size: 0.9rem; min-width: auto; color: var(--text); border-radius: 4px; font-weight: 600; line-height: 1; }
+.sync-help { font-size: 0.7rem; color: var(--text-dim); text-align: center; font-style: italic; }
 #subtitle-area { flex: 1; display: flex; align-items: center; justify-content: center; padding: 2rem 1rem; min-height: 300px; }
 #subtitle-text { font-size: var(--subtitle-size); line-height: 1.6; text-align: center; color: var(--text); max-width: 100%; transition: opacity 0.3s ease; }
 #subtitle-text.inactive { color: var(--text-dim); font-style: italic; }

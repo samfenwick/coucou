@@ -1,8 +1,11 @@
 import struct
 import io
+import logging
 import numpy as np
 import httpx
 from dataclasses import dataclass, field
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -99,12 +102,27 @@ class WhisperClient:
         response.raise_for_status()
         result = response.json()
 
+        log.debug("Whisper response keys: %s", list(result.keys()))
+        if result.get("segments"):
+            log.debug("First segment keys: %s", list(result["segments"][0].keys()))
+
+        # Some endpoints return words at top level, others nested in segments
+        top_level_words = result.get("words", [])
+
         segments = []
         for seg in result.get("segments", []):
+            # Try segment-level words first, fall back to top-level
+            seg_words = seg.get("words", [])
+            if not seg_words and top_level_words:
+                # Match top-level words to this segment by timestamp
+                seg_words = [
+                    w for w in top_level_words
+                    if w.get("start", 0) >= seg["start"] and w.get("end", 0) <= seg["end"] + 0.5
+                ]
             words = []
-            for w in seg.get("words", []):
+            for w in seg_words:
                 words.append({
-                    "word": w["word"],
+                    "word": w.get("word", w.get("text", "")),
                     "start": w["start"],
                     "end": w["end"],
                 })
