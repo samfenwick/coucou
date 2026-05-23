@@ -122,6 +122,7 @@ pipeline = {
     "subtitle_queue": asyncio.Queue(),
     "capture_thread": None,
     "whisper_thread": None,
+    "loop": None,
 }
 
 
@@ -140,6 +141,13 @@ def capture_thread_fn(process, ring_buffer):
         log.error(f"Capture thread error: {e}")
     finally:
         log.info("Capture thread stopped")
+
+
+def _enqueue_subtitle(item):
+    """Thread-safe enqueue: schedule put_nowait on the event loop."""
+    loop = pipeline.get("loop")
+    if loop:
+        loop.call_soon_threadsafe(pipeline["subtitle_queue"].put_nowait, item)
 
 
 def whisper_thread_fn(ring_buffer, whisper_client, config):
@@ -170,7 +178,7 @@ def whisper_thread_fn(ring_buffer, whisper_client, config):
                     overlap_seconds=int(config["OVERLAP_SECONDS"]),
                 )
                 for seg in segments:
-                    pipeline["subtitle_queue"].put_nowait({
+                    _enqueue_subtitle({
                         "type": "subtitle",
                         "text": seg.text,
                         "start": seg.start,
@@ -179,7 +187,7 @@ def whisper_thread_fn(ring_buffer, whisper_client, config):
                     })
             except Exception as e:
                 log.warning(f"Whisper error: {e}")
-                pipeline["subtitle_queue"].put_nowait({
+                _enqueue_subtitle({
                     "type": "subtitle",
                     "text": "Transcription unavailable",
                     "start": chunk_offset,
@@ -333,6 +341,7 @@ async def main():
     config = load_config()
     host = config["HOST"]
     port = int(config["PORT"])
+    pipeline["loop"] = asyncio.get_running_loop()
 
     async with serve(
         handle_websocket,
