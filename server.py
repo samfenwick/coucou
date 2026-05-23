@@ -3,9 +3,16 @@ import json
 import os
 import subprocess
 import logging
+import threading
+import time
 
+import numpy as np
 import websockets
 from websockets.asyncio.server import serve
+
+from buffer import RingBuffer
+from whisper_client import WhisperClient
+from encoder import AudioEncoder
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -105,6 +112,199 @@ async def handle_http(connection, request):
 
 connected_clients = set()
 
+# --- Pipeline state ---
+pipeline = {
+    "running": False,
+    "ring_buffer": None,
+    "capture_process": None,
+    "whisper_client": None,
+    "audio_encoder": None,
+    "subtitle_queue": asyncio.Queue(),
+    "capture_thread": None,
+    "whisper_thread": None,
+}
+
+
+def capture_thread_fn(process, ring_buffer):
+    """Read PCM from Swift capture subprocess and write to ring buffer."""
+    log.info("Capture thread started")
+    try:
+        while pipeline["running"]:
+            data = process.stdout.read(640)
+            if not data:
+                log.warning("Capture process ended")
+                break
+            samples = np.frombuffer(data, dtype=np.int16)
+            ring_buffer.write(samples)
+    except Exception as e:
+        log.error(f"Capture thread error: {e}")
+    finally:
+        log.info("Capture thread stopped")
+
+
+def whisper_thread_fn(ring_buffer, whisper_client, config):
+    """Pull overlapping chunks from ring buffer and transcribe."""
+    log.info("Whisper thread started")
+    chunk_samples = int(config["CHUNK_SECONDS"]) * 16000
+    overlap_samples = int(config["OVERLAP_SECONDS"]) * 16000
+    step_samples = chunk_samples - overlap_samples
+    next_position = ring_buffer.write_position
+
+    try:
+        while pipeline["running"]:
+            if ring_buffer.write_position < next_position + chunk_samples:
+                time.sleep(0.1)
+                continue
+
+            chunk = ring_buffer.read_at(next_position, chunk_samples)
+            if chunk is None:
+                next_position = max(0, ring_buffer.write_position - chunk_samples)
+                continue
+
+            chunk_offset = next_position / 16000.0
+
+            try:
+                segments = whisper_client.transcribe(
+                    chunk,
+                    chunk_offset_seconds=chunk_offset,
+                    overlap_seconds=int(config["OVERLAP_SECONDS"]),
+                )
+                for seg in segments:
+                    pipeline["subtitle_queue"].put_nowait({
+                        "type": "subtitle",
+                        "text": seg.text,
+                        "start": seg.start,
+                        "end": seg.end,
+                        "words": seg.words,
+                    })
+            except Exception as e:
+                log.warning(f"Whisper error: {e}")
+                pipeline["subtitle_queue"].put_nowait({
+                    "type": "subtitle",
+                    "text": "Transcription unavailable",
+                    "start": chunk_offset,
+                    "end": chunk_offset + float(config["CHUNK_SECONDS"]),
+                    "words": [],
+                })
+
+            next_position += step_samples
+    except Exception as e:
+        log.error(f"Whisper thread error: {e}")
+    finally:
+        log.info("Whisper thread stopped")
+
+
+def start_pipeline(app_name, config):
+    """Start the audio capture and transcription pipeline."""
+    if pipeline["running"]:
+        return
+
+    buffer_seconds = int(config["BUFFER_SECONDS"])
+    ring_buffer = RingBuffer(buffer_seconds=buffer_seconds, sample_rate=16000)
+    pipeline["ring_buffer"] = ring_buffer
+
+    capture_path = os.path.join(os.path.dirname(__file__) or ".", "capture")
+    process = subprocess.Popen(
+        [capture_path, app_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    pipeline["capture_process"] = process
+
+    pipeline["whisper_client"] = WhisperClient(
+        endpoint=config["WHISPER_ENDPOINT"],
+        model=config["WHISPER_MODEL"],
+    )
+
+    pipeline["audio_encoder"] = AudioEncoder(sample_rate=16000, channels=1)
+
+    pipeline["running"] = True
+
+    pipeline["capture_thread"] = threading.Thread(
+        target=capture_thread_fn, args=(process, ring_buffer), daemon=True
+    )
+    pipeline["whisper_thread"] = threading.Thread(
+        target=whisper_thread_fn, args=(ring_buffer, pipeline["whisper_client"], config), daemon=True
+    )
+    pipeline["capture_thread"].start()
+    pipeline["whisper_thread"].start()
+
+    log.info(f"Pipeline started for: {app_name}")
+
+
+def stop_pipeline():
+    """Stop the audio capture and transcription pipeline."""
+    pipeline["running"] = False
+
+    if pipeline["capture_process"]:
+        pipeline["capture_process"].terminate()
+        pipeline["capture_process"].wait(timeout=5)
+        pipeline["capture_process"] = None
+
+    if pipeline["capture_thread"]:
+        pipeline["capture_thread"].join(timeout=5)
+        pipeline["capture_thread"] = None
+
+    if pipeline["whisper_thread"]:
+        pipeline["whisper_thread"].join(timeout=5)
+        pipeline["whisper_thread"] = None
+
+    pipeline["ring_buffer"] = None
+    pipeline["whisper_client"] = None
+    pipeline["audio_encoder"] = None
+
+    log.info("Pipeline stopped")
+
+
+async def broadcast_audio():
+    """Read from ring buffer with delay, encode to WAV, broadcast to clients."""
+    while not pipeline["running"]:
+        await asyncio.sleep(0.1)
+
+    ring_buffer = pipeline["ring_buffer"]
+    encoder = pipeline["audio_encoder"]
+
+    await asyncio.sleep(float(load_config()["CHUNK_SECONDS"]) + 1)
+
+    reader = ring_buffer.create_reader()
+
+    while pipeline["running"]:
+        samples = reader.read(3200, block=False)
+        if samples is None:
+            await asyncio.sleep(0.01)
+            continue
+
+        try:
+            wav_chunk = encoder.encode_wav_chunk(samples)
+            if connected_clients:
+                await asyncio.gather(
+                    *[client.send(wav_chunk) for client in connected_clients],
+                    return_exceptions=True,
+                )
+        except Exception as e:
+            log.warning(f"Broadcast error: {e}")
+
+        await asyncio.sleep(0.19)
+
+
+async def broadcast_subtitles():
+    """Forward subtitles from the queue to all WebSocket clients."""
+    while True:
+        try:
+            subtitle = await asyncio.wait_for(
+                pipeline["subtitle_queue"].get(), timeout=0.5
+            )
+            if connected_clients:
+                msg = json.dumps(subtitle)
+                await asyncio.gather(
+                    *[client.send(msg) for client in connected_clients],
+                    return_exceptions=True,
+                )
+        except asyncio.TimeoutError:
+            continue
+        except Exception as e:
+            log.warning(f"Subtitle broadcast error: {e}")
+
 
 async def handle_websocket(websocket):
     """Handle a WebSocket connection."""
@@ -113,7 +313,15 @@ async def handle_websocket(websocket):
     try:
         async for message in websocket:
             data = json.loads(message)
-            log.info(f"Received: {data}")
+            if data.get("type") == "start":
+                app_name = data.get("source", "")
+                if app_name:
+                    config = load_config()
+                    start_pipeline(app_name, config)
+                    await websocket.send(json.dumps({"type": "status", "status": "capturing"}))
+            elif data.get("type") == "stop":
+                stop_pipeline()
+                await websocket.send(json.dumps({"type": "status", "status": "stopped"}))
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
@@ -133,7 +341,11 @@ async def main():
         process_request=handle_http,
     ) as server:
         log.info(f"Server running at http://{host}:{port}")
-        await asyncio.Future()  # run forever
+        await asyncio.gather(
+            asyncio.Future(),  # run forever
+            broadcast_audio(),
+            broadcast_subtitles(),
+        )
 
 
 if __name__ == "__main__":
