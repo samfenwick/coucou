@@ -48,10 +48,13 @@ def deduplicate_segments(previous, current, overlap_seconds):
 class WhisperClient:
     """Client for OpenAI-compatible Whisper transcription endpoint."""
 
-    def __init__(self, endpoint, model, timeout=10.0):
+    def __init__(self, endpoint, model, api_key=None, timeout=10.0):
         self.endpoint = endpoint
         self.model = model
-        self._client = httpx.Client(timeout=timeout)
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        self._client = httpx.Client(timeout=timeout, headers=headers)
         self._previous_segments = []
 
     def _build_wav(self, pcm_samples):

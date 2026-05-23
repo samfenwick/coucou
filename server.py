@@ -23,6 +23,7 @@ def load_config():
     config = {
         "WHISPER_ENDPOINT": "http://api.local.samfenwick.com/v1/audio/transcriptions",
         "WHISPER_MODEL": "whisper-v3-turbo",
+        "WHISPER_API_KEY": "",
         "PORT": "8000",
         "HOST": "0.0.0.0",
         "BUFFER_SECONDS": "10",
@@ -222,6 +223,7 @@ def start_pipeline(app_name, config):
     pipeline["whisper_client"] = WhisperClient(
         endpoint=config["WHISPER_ENDPOINT"],
         model=config["WHISPER_MODEL"],
+        api_key=config.get("WHISPER_API_KEY") or None,
     )
 
     pipeline["audio_encoder"] = AudioEncoder(sample_rate=16000, channels=1)
