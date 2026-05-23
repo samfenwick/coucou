@@ -54,7 +54,7 @@ class WhisperClient:
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        self._client = httpx.Client(timeout=timeout, headers=headers)
+        self._client = httpx.Client(timeout=timeout, headers=headers, follow_redirects=True)
         self._previous_segments = []
 
     def _build_wav(self, pcm_samples):
