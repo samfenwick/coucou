@@ -5,18 +5,22 @@ echo "=== Subcurrent E2E Test ==="
 
 # Check dependencies
 echo "Checking dependencies..."
-python3 -c "import websockets, numpy, httpx" || { echo "FAIL: Python deps missing"; exit 1; }
+python3 -c "import websockets, numpy, httpx, sounddevice" || { echo "FAIL: Python deps missing"; exit 1; }
 echo "  Python deps: OK"
 
-# Check capture tool
-if [ ! -f "./capture" ]; then
-    echo "  Compiling capture.swift..."
-    swiftc capture.swift -o capture \
-        -framework ScreenCaptureKit \
-        -framework CoreMedia \
-        -framework AVFoundation
+# Check BlackHole
+if ! python3 -c "import sounddevice as sd; assert any('BlackHole' in d['name'] for d in sd.query_devices())" 2>/dev/null; then
+    echo "  WARNING: BlackHole not detected (install with: brew install blackhole-2ch)"
+else
+    echo "  BlackHole: OK"
 fi
-echo "  capture binary: OK"
+
+# Check SwitchAudioSource
+if ! command -v SwitchAudioSource &>/dev/null; then
+    echo "  WARNING: SwitchAudioSource not found (install with: brew install switchaudio-osx)"
+else
+    echo "  SwitchAudioSource: OK"
+fi
 
 # Run unit tests
 echo ""
@@ -40,15 +44,6 @@ if [ "$STATUS" != "200" ]; then
     exit 1
 fi
 echo "  GET /: OK"
-
-# Test API
-SOURCES=$(curl -s http://localhost:8000/api/sources)
-if ! echo "$SOURCES" | python3 -c "import json,sys; json.load(sys.stdin)" 2>/dev/null; then
-    echo "FAIL: /api/sources not valid JSON"
-    kill $SERVER_PID 2>/dev/null
-    exit 1
-fi
-echo "  GET /api/sources: OK"
 
 # Test WebSocket
 echo "Testing WebSocket..."

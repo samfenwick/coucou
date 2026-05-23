@@ -10,7 +10,6 @@ const state = {
     nextPlayTime: 0,
     volume: 0.8,
     reconnectDelay: 1000,
-    subtitles: [],
 };
 
 // --- Audio Context + WAV Decoding ---
@@ -25,11 +24,31 @@ function ensureAudioContext() {
     return state.audioCtx;
 }
 
+async function routeAudioToDevice(deviceName) {
+    // Route web app audio to the real speakers (not BlackHole)
+    // so the user hears our buffered playback while system output is BlackHole
+    const ctx = state.audioCtx;
+    if (!ctx || !ctx.setSinkId) return;
+
+    try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const outputDevices = devices.filter(d => d.kind === "audiooutput");
+        const target = outputDevices.find(d => d.label.includes(deviceName));
+        if (target) {
+            await ctx.setSinkId(target.deviceId);
+            console.log(`Audio output routed to: ${target.label}`);
+        } else {
+            console.warn(`Output device "${deviceName}" not found, using default`);
+        }
+    } catch (err) {
+        console.warn("setSinkId failed:", err);
+    }
+}
+
 async function playAudioChunk(wavBytes) {
     const ctx = ensureAudioContext();
 
     try {
-        // Decode WAV to PCM via Web Audio API
         const audioBuffer = await ctx.decodeAudioData(wavBytes.buffer.slice(0));
 
         const source = ctx.createBufferSource();
@@ -40,7 +59,6 @@ async function playAudioChunk(wavBytes) {
         source.connect(gain);
         gain.connect(ctx.destination);
 
-        // Schedule playback to maintain continuity
         const now = ctx.currentTime;
         if (state.nextPlayTime < now) {
             state.nextPlayTime = now;
@@ -59,9 +77,8 @@ function renderSubtitle(data) {
     el.classList.remove("inactive");
 
     if (data.words && data.words.length > 0) {
-        // Word-level rendering for karaoke highlighting
         el.innerHTML = data.words
-            .map((w, i) => `<span class="word" data-start="${w.start}" data-end="${w.end}">${w.word} </span>`)
+            .map((w) => `<span class="word" data-start="${w.start}" data-end="${w.end}">${w.word} </span>`)
             .join("");
         scheduleWordHighlighting(data.words);
     } else {
@@ -78,7 +95,6 @@ function scheduleWordHighlighting(words) {
         const start = parseFloat(wordEl.dataset.start);
         const end = parseFloat(wordEl.dataset.end);
 
-        // Apply sync offset (convert ms to seconds)
         const offsetSec = state.syncOffset / 1000;
         const highlightAt = (start + offsetSec) - baseTime;
         const unhighlightAt = (end + offsetSec) - baseTime;
@@ -111,15 +127,13 @@ function connect() {
 
     state.ws.addEventListener("message", (event) => {
         if (event.data instanceof ArrayBuffer) {
-            // Binary = WAV audio chunk
             playAudioChunk(new Uint8Array(event.data));
         } else {
-            // Text = JSON (subtitle or status)
             const data = JSON.parse(event.data);
             if (data.type === "subtitle") {
                 renderSubtitle(data);
             } else if (data.type === "status") {
-                handleStatus(data.status);
+                handleStatus(data);
             }
         }
     });
@@ -127,7 +141,6 @@ function connect() {
     state.ws.addEventListener("close", () => {
         $("#connection-status").textContent = "Disconnected";
         $("#connection-status").classList.remove("connected");
-        // Auto-reconnect with exponential backoff
         setTimeout(() => {
             state.reconnectDelay = Math.min(state.reconnectDelay * 2, 30000);
             connect();
@@ -139,13 +152,18 @@ function connect() {
     });
 }
 
-function handleStatus(status) {
-    if (status === "capturing") {
+function handleStatus(data) {
+    if (data.status === "capturing") {
         state.capturing = true;
         $("#start-stop").textContent = "Stop";
         $("#subtitle-text").textContent = "Listening...";
         $("#subtitle-text").classList.add("inactive");
-    } else if (status === "stopped") {
+
+        // Route audio to real speakers (system output is now BlackHole)
+        if (data.outputDevice) {
+            routeAudioToDevice(data.outputDevice);
+        }
+    } else if (data.status === "stopped") {
         state.capturing = false;
         $("#start-stop").textContent = "Start";
         $("#subtitle-text").textContent = "Waiting for audio...";
@@ -161,14 +179,8 @@ $("#start-stop").addEventListener("click", () => {
     if (state.capturing) {
         state.ws.send(JSON.stringify({ type: "stop" }));
     } else {
-        const source = $("#source-select").value;
-        if (!source) {
-            alert("Select an audio source first");
-            return;
-        }
-        // Ensure AudioContext is created on user gesture (iOS requirement)
         ensureAudioContext();
-        state.ws.send(JSON.stringify({ type: "start", source }));
+        state.ws.send(JSON.stringify({ type: "start" }));
     }
 });
 
@@ -180,25 +192,6 @@ $("#sync-offset").addEventListener("input", (e) => {
     state.syncOffset = parseInt(e.target.value, 10);
     $("#sync-offset-label").textContent = `${state.syncOffset}ms`;
 });
-
-// --- Source List ---
-
-async function loadSources() {
-    const select = $("#source-select");
-    try {
-        const resp = await fetch("/api/sources");
-        const sources = await resp.json();
-        select.innerHTML = '<option value="">Select an app...</option>';
-        for (const s of sources) {
-            const opt = document.createElement("option");
-            opt.value = s.name;
-            opt.textContent = s.name;
-            select.appendChild(opt);
-        }
-    } catch (err) {
-        console.error("Failed to load sources:", err);
-    }
-}
 
 // --- Wake Lock (prevent screen sleep on mobile) ---
 
@@ -214,7 +207,5 @@ async function requestWakeLock() {
 
 // --- Init ---
 
-$("#refresh-sources").addEventListener("click", loadSources);
-loadSources();
 connect();
 requestWakeLock();

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import subprocess
 import logging
 import threading
 import time
@@ -13,6 +12,7 @@ from websockets.asyncio.server import serve
 from buffer import RingBuffer
 from whisper_client import WhisperClient
 from encoder import AudioEncoder
+from audio_capture import AudioCapture
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -41,23 +41,6 @@ def load_config():
     return config
 
 
-def list_audio_sources():
-    """Run the Swift capture tool with --list and return parsed JSON."""
-    capture_path = os.path.join(os.path.dirname(__file__) or ".", "capture")
-    result = subprocess.run(
-        [capture_path, "--list"],
-        capture_output=True, text=True, timeout=5,
-    )
-    sources = []
-    for line in result.stderr.strip().split("\n"):
-        if line:
-            try:
-                sources.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return sources
-
-
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -70,7 +53,6 @@ CONTENT_TYPES = {
 
 async def handle_http(connection, request):
     """Serve static files from the static/ directory. Return None for WebSocket upgrades."""
-    # Let WebSocket upgrades pass through to handle_websocket
     if request.headers.get("Upgrade", "").lower() == "websocket":
         return None
 
@@ -79,20 +61,10 @@ async def handle_http(connection, request):
 
     if path == "/":
         path = "/index.html"
-    elif path == "/api/sources":
-        sources = list_audio_sources()
-        body = json.dumps(sources).encode()
-        return websockets.http11.Response(
-            200,
-            "OK",
-            websockets.datastructures.Headers({"Content-Type": "application/json"}),
-            body,
-        )
 
     file_path = os.path.join(static_dir, path.lstrip("/"))
     file_path = os.path.realpath(file_path)
 
-    # Security: ensure we're still inside static_dir
     if not file_path.startswith(os.path.realpath(static_dir)):
         return websockets.http11.Response(403, "Forbidden", websockets.datastructures.Headers(), b"Forbidden")
 
@@ -113,39 +85,20 @@ async def handle_http(connection, request):
     )
 
 
-# --- WebSocket handler (audio + subtitles added in later tasks) ---
-
 connected_clients = set()
 
 # --- Pipeline state ---
 pipeline = {
     "running": False,
     "ring_buffer": None,
-    "capture_process": None,
+    "audio_capture": None,
     "whisper_client": None,
     "audio_encoder": None,
     "subtitle_queue": asyncio.Queue(),
-    "capture_thread": None,
     "whisper_thread": None,
     "loop": None,
+    "original_output_device": None,
 }
-
-
-def capture_thread_fn(process, ring_buffer):
-    """Read PCM from Swift capture subprocess and write to ring buffer."""
-    log.info("Capture thread started")
-    try:
-        while pipeline["running"]:
-            data = process.stdout.read(640)
-            if not data:
-                log.warning("Capture process ended")
-                break
-            samples = np.frombuffer(data, dtype=np.int16)
-            ring_buffer.write(samples)
-    except Exception as e:
-        log.error(f"Capture thread error: {e}")
-    finally:
-        log.info("Capture thread stopped")
 
 
 def _enqueue_subtitle(item):
@@ -207,22 +160,19 @@ def whisper_thread_fn(ring_buffer, whisper_client, config):
         log.info("Whisper thread stopped")
 
 
-def start_pipeline(app_name, config):
+def start_pipeline(config):
     """Start the audio capture and transcription pipeline."""
     if pipeline["running"]:
-        return
+        return None
 
     buffer_seconds = int(config["BUFFER_SECONDS"])
     ring_buffer = RingBuffer(buffer_seconds=buffer_seconds, sample_rate=16000)
     pipeline["ring_buffer"] = ring_buffer
 
-    capture_path = os.path.join(os.path.dirname(__file__) or ".", "capture")
-    process = subprocess.Popen(
-        [capture_path, app_name],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    pipeline["capture_process"] = process
+    capture = AudioCapture(ring_buffer, sample_rate=16000)
+    original_device = capture.start()
+    pipeline["audio_capture"] = capture
+    pipeline["original_output_device"] = original_device
 
     pipeline["whisper_client"] = WhisperClient(
         endpoint=config["WHISPER_ENDPOINT"],
@@ -234,30 +184,22 @@ def start_pipeline(app_name, config):
 
     pipeline["running"] = True
 
-    pipeline["capture_thread"] = threading.Thread(
-        target=capture_thread_fn, args=(process, ring_buffer), daemon=True
-    )
     pipeline["whisper_thread"] = threading.Thread(
         target=whisper_thread_fn, args=(ring_buffer, pipeline["whisper_client"], config), daemon=True
     )
-    pipeline["capture_thread"].start()
     pipeline["whisper_thread"].start()
 
-    log.info(f"Pipeline started for: {app_name}")
+    log.info("Pipeline started")
+    return original_device
 
 
 def stop_pipeline():
     """Stop the audio capture and transcription pipeline."""
     pipeline["running"] = False
 
-    if pipeline["capture_process"]:
-        pipeline["capture_process"].terminate()
-        pipeline["capture_process"].wait(timeout=5)
-        pipeline["capture_process"] = None
-
-    if pipeline["capture_thread"]:
-        pipeline["capture_thread"].join(timeout=5)
-        pipeline["capture_thread"] = None
+    if pipeline["audio_capture"]:
+        pipeline["audio_capture"].stop()
+        pipeline["audio_capture"] = None
 
     if pipeline["whisper_thread"]:
         pipeline["whisper_thread"].join(timeout=5)
@@ -266,6 +208,7 @@ def stop_pipeline():
     pipeline["ring_buffer"] = None
     pipeline["whisper_client"] = None
     pipeline["audio_encoder"] = None
+    pipeline["original_output_device"] = None
 
     log.info("Pipeline stopped")
 
@@ -328,11 +271,13 @@ async def handle_websocket(websocket):
         async for message in websocket:
             data = json.loads(message)
             if data.get("type") == "start":
-                app_name = data.get("source", "")
-                if app_name:
-                    config = load_config()
-                    start_pipeline(app_name, config)
-                    await websocket.send(json.dumps({"type": "status", "status": "capturing"}))
+                config = load_config()
+                original_device = start_pipeline(config)
+                await websocket.send(json.dumps({
+                    "type": "status",
+                    "status": "capturing",
+                    "outputDevice": original_device,
+                }))
             elif data.get("type") == "stop":
                 stop_pipeline()
                 await websocket.send(json.dumps({"type": "status", "status": "stopped"}))
@@ -357,7 +302,7 @@ async def main():
     ) as server:
         log.info(f"Server running at http://{host}:{port}")
         await asyncio.gather(
-            asyncio.Future(),  # run forever
+            asyncio.Future(),
             broadcast_audio(),
             broadcast_subtitles(),
         )
