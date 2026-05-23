@@ -69,7 +69,11 @@ CONTENT_TYPES = {
 
 
 async def handle_http(connection, request):
-    """Serve static files from the static/ directory."""
+    """Serve static files from the static/ directory. Return None for WebSocket upgrades."""
+    # Let WebSocket upgrades pass through to handle_websocket
+    if request.headers.get("Upgrade", "").lower() == "websocket":
+        return None
+
     static_dir = os.path.join(os.path.dirname(__file__) or ".", "static")
     path = request.path
 
