@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Subcurrent</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>Subcurrent</h1>
+        </header>
+        <div id="controls">
+            <div class="control-group">
+                <label for="source-select">Audio Source</label>
+                <select id="source-select">
+                    <option value="">Select an app...</option>
+                </select>
+                <button id="refresh-sources" title="Refresh">&#x21bb;</button>
+            </div>
+            <div class="control-group">
+                <button id="start-stop">Start</button>
+            </div>
+            <div class="control-group">
+                <label for="volume">Volume</label>
+                <input type="range" id="volume" min="0" max="100" value="80">
+            </div>
+            <div class="control-group">
+                <label for="sync-offset">Sync Offset</label>
+                <input type="range" id="sync-offset" min="-2000" max="2000" value="0" step="50">
+                <span id="sync-offset-label">0ms</span>
+            </div>
+        </div>
+        <div id="subtitle-area">
+            <p id="subtitle-text">Waiting for audio...</p>
+        </div>
+        <div id="status-bar">
+            <span id="connection-status">Disconnected</span>
+            <span id="language-detected"></span>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
