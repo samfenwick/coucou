@@ -28,6 +28,38 @@ body {
     width: 100%;
 }
 
+/* --- Enter screen --- */
+
+#enter-screen {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    height: 100dvh;
+}
+
+#enter-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    padding: 0.8rem 3rem;
+    font-size: 1.1rem;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    letter-spacing: 0.02em;
+    transition: transform 0.1s ease, box-shadow 0.2s ease;
+}
+
+#enter-btn:hover {
+    box-shadow: 0 0 30px var(--accent-glow);
+}
+
+#enter-btn:active {
+    transform: scale(0.96);
+}
+
 /* --- Main layout --- */
 
 #app {

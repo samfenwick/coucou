@@ -420,8 +420,7 @@ function handleStatus(data) {
         state.streamTimeBase = null;
         state.audioCtxTimeBase = null;
         if (state.audioCtx && state.audioCtx.state !== "closed") {
-            state.audioCtx.close();
-            state.audioCtx = null;
+            state.audioCtx.suspend();
         }
     }
 }
@@ -776,8 +775,20 @@ document.addEventListener("mousemove", resetDimTimer);
 document.addEventListener("touchstart", resetDimTimer);
 document.addEventListener("keydown", resetDimTimer);
 
-// --- Init ---
+// --- Enter screen ---
 
-connect();
-requestWakeLock();
-loadOutputDevices();
+$("#enter-btn").addEventListener("click", async () => {
+    // Create AudioContext on user gesture so browsers allow playback
+    state.audioCtx = new AudioContext({ sampleRate: 48000 });
+    if (navigator.audioSession) {
+        navigator.audioSession.type = "playback";
+    }
+    await state.audioCtx.resume();
+
+    $("#enter-screen").style.display = "none";
+    $("#app").style.display = "flex";
+
+    connect();
+    requestWakeLock();
+    loadOutputDevices();
+});
