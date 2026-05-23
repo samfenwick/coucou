@@ -1,6 +1,7 @@
 import Foundation
 import ScreenCaptureKit
 import AVFoundation
+import AppKit
 
 enum CaptureError: Error, LocalizedError {
     case appNotFound(String)
@@ -114,6 +115,9 @@ class AudioCapture: NSObject, SCStreamDelegate, SCStreamOutput {
 }
 
 // MARK: - Main
+
+// Connect to the window server (required for ScreenCaptureKit)
+let _ = NSApplication.shared
 
 let capture = AudioCapture()
 let args = CommandLine.arguments
