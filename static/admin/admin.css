@@ -1,0 +1,304 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+    --bg: #0a0a0a;
+    --surface: #111;
+    --surface-2: #141414;
+    --border: #1a1a1a;
+    --text: #e8e8e8;
+    --text-dim: #888;
+    --text-muted: #444;
+    --accent: #4a9eff;
+    --green: #22c55e;
+    --red: #ff4466;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Header */
+#header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.brand { font-weight: 700; font-size: 15px; }
+
+.badge {
+    font-size: 10px;
+    color: var(--text-muted);
+    border: 1px solid #2a2a2a;
+    padding: 1px 6px;
+    border-radius: 3px;
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.status-badge {
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-badge.running { color: var(--green); }
+.status-badge.running .status-dot { background: var(--green); }
+.status-badge.stopped { color: var(--red); }
+.status-badge.stopped .status-dot { background: var(--red); }
+
+.btn-start {
+    border: none;
+    color: white;
+    padding: 5px 16px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    background: var(--accent);
+}
+
+.btn-start.running { background: var(--red); }
+
+/* Panels */
+#panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    flex: 1;
+    overflow: hidden;
+}
+
+#controls {
+    padding: 24px 28px;
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+}
+
+#stats {
+    padding: 24px 28px;
+    background: #0c0c0c;
+    overflow-y: auto;
+}
+
+/* Control groups */
+.group-label {
+    display: block;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+
+.control-group {
+    margin-bottom: 28px;
+}
+
+/* Segmented toggle */
+.segmented {
+    display: flex;
+    background: var(--surface);
+    border-radius: 6px;
+    padding: 2px;
+}
+
+.seg-btn {
+    flex: 1;
+    text-align: center;
+    padding: 7px;
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border-radius: 5px;
+    font-family: inherit;
+    transition: background 0.2s, color 0.2s;
+}
+
+.seg-btn.active {
+    background: rgba(74, 158, 255, 0.1);
+    color: var(--accent);
+}
+
+.hint {
+    font-size: 10px;
+    color: #3a3a3a;
+    font-style: italic;
+    margin-top: 4px;
+}
+
+/* Mic picker */
+.mic-picker {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 10px;
+    opacity: 0.25;
+    transition: opacity 0.3s ease;
+}
+
+.mic-picker.active { opacity: 1; }
+
+.mic-picker span { font-size: 12px; color: var(--text-dim); }
+
+.mic-picker select {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-family: inherit;
+    max-width: 180px;
+}
+
+/* Toggle switches */
+.toggle-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 9px 0;
+    font-size: 13px;
+    color: #aaa;
+}
+
+.toggle {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    display: inline-block;
+}
+
+.toggle input { opacity: 0; width: 0; height: 0; }
+
+.slider {
+    position: absolute;
+    inset: 0;
+    background: #333;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.slider::before {
+    content: "";
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    left: 2px;
+    top: 2px;
+    background: white;
+    border-radius: 50%;
+    transition: transform 0.2s;
+}
+
+.toggle input:checked + .slider { background: var(--green); }
+.toggle input:checked + .slider::before { transform: translateX(16px); }
+
+/* Stepper */
+.stepper-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
+.stepper {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.step-btn {
+    background: var(--border);
+    border: 1px solid #2a2a2a;
+    color: var(--text-dim);
+    width: 24px;
+    height: 24px;
+    border-radius: 5px;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-family: inherit;
+    line-height: 1;
+}
+
+.step-btn:active { background: #2a2a2a; }
+
+.step-value {
+    font-size: 14px;
+    color: var(--accent);
+    font-weight: 700;
+    min-width: 28px;
+    text-align: center;
+}
+
+/* Stats */
+.stat-counters {
+    display: flex;
+    gap: 28px;
+    margin-bottom: 32px;
+}
+
+.stat-counter { display: flex; flex-direction: column; }
+.stat-label { font-size: 10px; color: var(--text-muted); margin-bottom: 4px; }
+.stat-number { font-size: 26px; font-weight: 700; }
+.stat-number.blue { color: var(--accent); }
+.stat-number.green { color: var(--green); }
+.stat-unit { font-size: 12px; color: var(--text-muted); }
+
+.stat-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 7px 0;
+    font-size: 12px;
+}
+
+.stat-row span:first-child { color: var(--text-dim); }
+.stat-row span:last-child { color: #aaa; font-weight: 600; }
+
+#translation-summary {
+    display: flex;
+    gap: 12px;
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+}

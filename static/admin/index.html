@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Coucou Admin</title>
+    <meta name="theme-color" content="#0a0a0a">
+    <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+    <header id="header">
+        <div class="header-left">
+            <span class="brand">Coucou</span>
+            <span class="badge">Admin</span>
+        </div>
+        <div class="header-right">
+            <span id="pipeline-status" class="status-badge stopped">
+                <span class="status-dot"></span>
+                <span id="status-text">Stopped</span>
+            </span>
+            <button id="start-stop" class="btn-start">Start</button>
+        </div>
+    </header>
+
+    <main id="panels">
+        <!-- Left: Controls -->
+        <section id="controls">
+            <div class="control-group">
+                <label class="group-label">Mode</label>
+                <div class="segmented" id="mode-toggle">
+                    <button class="seg-btn active" data-value="synced">Synced</button>
+                    <button class="seg-btn" data-value="realtime">Realtime</button>
+                </div>
+                <p class="hint" id="mode-hint">Delayed audio, perfect word highlighting</p>
+            </div>
+
+            <div class="control-group">
+                <label class="group-label">Audio Source</label>
+                <div class="segmented" id="source-toggle">
+                    <button class="seg-btn active" data-value="system">System</button>
+                    <button class="seg-btn" data-value="mic">Mic</button>
+                    <button class="seg-btn" data-value="both">Both</button>
+                </div>
+                <div class="mic-picker" id="mic-picker">
+                    <span>Microphone</span>
+                    <select id="mic-select"><option value="">Default</option></select>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <label class="group-label">Pipeline</label>
+                <div class="toggle-row">
+                    <span>Broadcast Audio</span>
+                    <label class="toggle"><input type="checkbox" id="toggle-broadcast" checked><span class="slider"></span></label>
+                </div>
+                <div class="toggle-row">
+                    <span>Translation</span>
+                    <label class="toggle"><input type="checkbox" id="toggle-translation" checked><span class="slider"></span></label>
+                </div>
+                <div class="toggle-row">
+                    <span>Speaker Diarization</span>
+                    <label class="toggle"><input type="checkbox" id="toggle-diarization" checked><span class="slider"></span></label>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <label class="group-label">Tuning</label>
+                <div class="stepper-row">
+                    <span>Chunk Size</span>
+                    <div class="stepper">
+                        <button class="step-btn" data-field="chunk" data-dir="-1">&minus;</button>
+                        <span id="chunk-value" class="step-value">10s</span>
+                        <button class="step-btn" data-field="chunk" data-dir="1">+</button>
+                    </div>
+                </div>
+                <div class="stepper-row">
+                    <span>Overlap</span>
+                    <div class="stepper">
+                        <button class="step-btn" data-field="overlap" data-dir="-1">&minus;</button>
+                        <span id="overlap-value" class="step-value">2s</span>
+                        <button class="step-btn" data-field="overlap" data-dir="1">+</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Right: Live Stats -->
+        <section id="stats">
+            <label class="group-label">Live</label>
+            <div class="stat-counters">
+                <div class="stat-counter">
+                    <span class="stat-label">Clients</span>
+                    <span class="stat-number blue" id="stat-clients">0</span>
+                </div>
+                <div class="stat-counter">
+                    <span class="stat-label">Buffer</span>
+                    <span class="stat-number green" id="stat-buffer">0<span class="stat-unit">s</span></span>
+                </div>
+                <div class="stat-counter">
+                    <span class="stat-label">Source</span>
+                    <span class="stat-number" id="stat-source">—</span>
+                </div>
+            </div>
+
+            <label class="group-label">Processing</label>
+            <div id="processing-rows">
+                <div class="stat-row">
+                    <span>Transcription</span>
+                    <span id="proc-transcription">—</span>
+                </div>
+                <div class="stat-row">
+                    <span>Diarization</span>
+                    <span id="proc-diarization">—</span>
+                </div>
+            </div>
+            <div id="translation-rows"></div>
+
+            <label class="group-label">Translations</label>
+            <div id="translation-summary">—</div>
+        </section>
+    </main>
+
+    <script src="admin.js"></script>
+</body>
+</html>
