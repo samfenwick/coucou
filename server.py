@@ -348,5 +348,17 @@ async def main():
         )
 
 
+import signal
+
+
+def handle_shutdown(sig, frame):
+    log.info("Shutting down...")
+    stop_pipeline()
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
+
 if __name__ == "__main__":
     asyncio.run(main())
