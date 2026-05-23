@@ -131,16 +131,16 @@ if args.contains("--list") {
     semaphore.wait()
 } else if args.count >= 2 {
     let appName = args[1]
-    let semaphore = DispatchSemaphore(value: 0)
     Task {
         do {
             try await capture.startCapture(appName: appName)
         } catch {
             FileHandle.standardError.write(Data("Error: \(error.localizedDescription)\n".utf8))
-            semaphore.signal()
+            exit(1)
         }
     }
-    semaphore.wait()
+    // Run the main run loop so ScreenCaptureKit callbacks can fire
+    RunLoop.main.run()
 } else {
     FileHandle.standardError.write(Data("Usage: capture <app-name> | capture --list\n".utf8))
     exit(1)
