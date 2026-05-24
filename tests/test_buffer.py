@@ -62,7 +62,7 @@ def test_wraps_around():
 
 
 def test_read_chunk_at_position():
-    """Read a specific chunk by absolute position (for whisper overlap)."""
+    """Read a specific chunk by absolute position (for transcription overlap)."""
     buf = RingBuffer(buffer_seconds=5, sample_rate=16000)
     for i in range(3):
         chunk = np.full(16000, fill_value=i, dtype=np.int16)

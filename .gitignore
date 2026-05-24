@@ -1,5 +1,32 @@
+# Environment and settings
 .env
+.settings.json
+
+# Python
 __pycache__/
 *.pyc
-.superpowers/
+*.pyo
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+
+# Virtual environments
+.venv/
 venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code / Superpowers
+.claude/
+.superpowers/
+docs/superpowers/

@@ -10,6 +10,7 @@
     --text-muted: #444;
     --accent: #4a9eff;
     --green: #22c55e;
+    --orange: #ffaa00;
     --red: #ff4466;
 }
 
@@ -73,6 +74,8 @@ body {
 
 .status-badge.running { color: var(--green); }
 .status-badge.running .status-dot { background: var(--green); }
+.status-badge.buffering { color: var(--orange); }
+.status-badge.buffering .status-dot { background: var(--orange); }
 .status-badge.stopped { color: var(--red); }
 .status-badge.stopped .status-dot { background: var(--red); }
 
@@ -262,6 +265,9 @@ body {
 }
 
 .step-btn:active { background: #2a2a2a; }
+.step-btn:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
+
+.control-group.disabled { opacity: 0.4; pointer-events: none; }
 
 .step-value {
     font-size: 14px;

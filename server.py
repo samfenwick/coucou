@@ -10,8 +10,7 @@ import websockets
 from websockets.asyncio.server import serve
 
 from buffer import RingBuffer
-from whisper_client import WhisperClient
-from local_transcriber import LocalTranscriber, preload_model
+from local_transcriber import LocalTranscriber, StreamingTranscriber, preload_model
 from encoder import AudioEncoder
 from audio_capture import AudioCapture
 from diarize import create_diarizer
@@ -29,9 +28,6 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 def load_config():
     """Load configuration from .env file."""
     config = {
-        "WHISPER_ENDPOINT": "",
-        "WHISPER_MODEL": "",
-        "WHISPER_API_KEY": "",
         "PORT": "8000",
         "HOST": "0.0.0.0",
         "ADMIN_PORT": "8001",
@@ -66,15 +62,21 @@ MODE_PRESETS = {
         "translate_enabled": True,
         "diarize_enabled": True,
         "broadcast_audio": True,
+        "audio_delay": 15.0,
     },
     "realtime": {
-        "chunk_seconds": 3,
+        "chunk_seconds": 2,
         "overlap_seconds": 1,
-        "translate_enabled": False,
+        "translate_enabled": True,
         "diarize_enabled": False,
         "broadcast_audio": True,
+        "audio_delay": 0.15,
     },
 }
+
+
+
+
 
 
 async def handle_http(connection, request):
@@ -103,12 +105,8 @@ async def handle_http(connection, request):
     with open(file_path, "rb") as f:
         body = f.read()
 
-    return websockets.http11.Response(
-        200,
-        "OK",
-        websockets.datastructures.Headers({"Content-Type": content_type}),
-        body,
-    )
+    headers = {"Content-Type": content_type, "Cache-Control": "no-cache, no-store, must-revalidate"}
+    return websockets.http11.Response(200, "OK", websockets.datastructures.Headers(headers), body)
 
 
 async def handle_http_admin(connection, request):
@@ -137,12 +135,8 @@ async def handle_http_admin(connection, request):
     with open(file_path, "rb") as f:
         body = f.read()
 
-    return websockets.http11.Response(
-        200,
-        "OK",
-        websockets.datastructures.Headers({"Content-Type": content_type}),
-        body,
-    )
+    headers = {"Content-Type": content_type, "Cache-Control": "no-cache, no-store, must-revalidate"}
+    return websockets.http11.Response(200, "OK", websockets.datastructures.Headers(headers), body)
 
 
 connected_clients = set()
@@ -153,7 +147,16 @@ client_state = {}  # websocket -> {"target_language": "en"}
 # --- Settings persistence ---
 
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__) or ".", ".settings.json")
-SETTINGS_DEFAULTS = {"audio_delay": 15.0, "chunk_seconds": 10, "overlap_seconds": 2}
+SETTINGS_DEFAULTS = {
+    "chunk_seconds": 10,
+    "overlap_seconds": 2,
+    "mode": "synced",
+    "audio_source": "system",
+    "mic_device": None,
+    "broadcast_audio": True,
+    "translate_enabled": True,
+    "diarize_enabled": True,
+}
 
 
 def load_settings():
@@ -183,28 +186,29 @@ saved = load_settings()
 pipeline = {
     "running": False,
     "playback_buffer": None,  # 48kHz for audio streaming
-    "whisper_buffer": None,   # 16kHz for transcription
+    "transcription_buffer": None,   # 16kHz for transcription
     "audio_capture": None,
-    "whisper_client": None,
+    "transcriber": None,
     "audio_encoder": None,
     "subtitle_queue": asyncio.Queue(),
     "diarizer": None,
     "translator": None,
-    "whisper_thread": None,
+    "transcription_thread": None,
     "loop": None,
     "original_output_device": None,
-    "audio_delay": saved["audio_delay"],
+    "audio_delay": MODE_PRESETS.get(saved.get("mode", "synced"), {}).get("audio_delay", 15.0),
     "chunk_seconds": saved["chunk_seconds"],
     "overlap_seconds": saved["overlap_seconds"],
     # Admin / pipeline control state
-    "mode": "synced",
-    "audio_source": "system",
-    "mic_device": None,
-    "broadcast_audio": True,
-    "translate_enabled": True,
-    "diarize_enabled": True,
+    "mode": saved.get("mode", "synced"),
+    "audio_source": saved.get("audio_source", "system"),
+    "mic_device": saved.get("mic_device"),
+    "broadcast_audio": saved.get("broadcast_audio", True),
+    "translate_enabled": saved.get("translate_enabled", True),
+    "diarize_enabled": saved.get("diarize_enabled", True),
     "default_target_language": "en",
     "stats": {},
+    "status": "stopped",  # stopped | buffering | capturing
 }
 
 
@@ -213,43 +217,47 @@ def _enqueue_subtitle(item):
     loop = pipeline.get("loop")
     if loop:
         loop.call_soon_threadsafe(pipeline["subtitle_queue"].put_nowait, item)
+    else:
+        log.warning("Cannot enqueue subtitle — event loop not set!")
 
 
-def _tag_words_with_speakers(words, speaker_segments, chunk_offset):
+def _tag_words_with_speakers(words, speaker_segments):
     """Assign a speaker ID to each word based on diarization segments.
 
-    Words have absolute timestamps (offset applied).
-    Speaker segments have chunk-relative timestamps (0 to chunk_seconds).
+    Both words and speaker_segments use absolute timestamps.
     """
     if not speaker_segments:
         return
 
-    # If one speaker dominates (>80% of total time), skip tagging —
-    # the model is probably mis-splitting a single speaker
-    speaker_durations = {}
-    for seg in speaker_segments:
-        spk = seg["speaker"]
-        speaker_durations[spk] = speaker_durations.get(spk, 0) + (seg["end"] - seg["start"])
-    total_duration = sum(speaker_durations.values())
-    if total_duration > 0 and len(speaker_durations) > 1:
-        dominant = max(speaker_durations.values())
-        if dominant / total_duration > 0.8:
-            log.debug(f"Single dominant speaker ({dominant/total_duration:.0%}), skipping diarization tags")
-            return
+    # Single speaker — tag all words with that speaker
+    unique_speakers = set(seg["speaker"] for seg in speaker_segments)
+    if len(unique_speakers) <= 1:
+        spk = next(iter(unique_speakers))
+        for word in words:
+            word["speaker"] = spk
+        return
 
     tagged = 0
     for word in words:
-        mid = (word["start"] + word["end"]) / 2
         best_speaker = None
         best_overlap = 0
+        best_distance = float("inf")
+        w_start = word["start"]
+        w_end = word["end"]
+        w_mid = (w_start + w_end) / 2
         for seg in speaker_segments:
-            seg_start = seg["start"] + chunk_offset
-            seg_end = seg["end"] + chunk_offset
-            if seg_start <= mid <= seg_end:
-                overlap = min(word["end"], seg_end) - max(word["start"], seg_start)
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_speaker = seg["speaker"]
+            # Calculate actual overlap between word and segment
+            overlap = min(w_end, seg["end"]) - max(w_start, seg["start"])
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = seg["speaker"]
+            elif overlap <= 0:
+                # Track nearest segment for untagged words
+                dist = min(abs(w_mid - seg["start"]), abs(w_mid - seg["end"]))
+                if dist < best_distance:
+                    best_distance = dist
+                    if best_overlap <= 0:
+                        best_speaker = seg["speaker"]
         if best_speaker is not None:
             word["speaker"] = best_speaker
             tagged += 1
@@ -268,6 +276,7 @@ def get_admin_state():
     return {
         "type": "state",
         "running": pipeline["running"],
+        "status": pipeline["status"],
         "mode": pipeline.get("mode", "synced"),
         "audio_source": pipeline.get("audio_source", "system"),
         "mic_device": pipeline.get("mic_device"),
@@ -288,17 +297,42 @@ def get_admin_state():
     }
 
 
+def _viewer_status_msg():
+    """Build the status message dict for viewer clients."""
+    status = pipeline["status"]  # stopped | buffering | capturing
+    msg = {"type": "status", "status": status}
+    if status != "stopped":
+        msg["buffer_seconds"] = pipeline["audio_delay"]
+        msg["chunk_seconds"] = pipeline["chunk_seconds"]
+        msg["broadcast_audio"] = pipeline.get("broadcast_audio", True)
+        if pipeline.get("original_output_device"):
+            msg["outputDevice"] = pipeline["original_output_device"]
+    return msg
+
+
+async def _notify_viewers_settings_changed():
+    """Push updated settings + sync reset to all viewer clients."""
+    translate_on = pipeline.get("translate_enabled", True) and pipeline.get("translator") is not None
+    settings_msg = json.dumps({
+        "type": "settings",
+        "translate_enabled": translate_on,
+        "chunk_seconds": pipeline["chunk_seconds"],
+        "overlap_seconds": pipeline["overlap_seconds"],
+    })
+    reset_msg = json.dumps({"type": "sync_reset"})
+    for client in list(connected_clients):
+        try:
+            await client.send(settings_msg)
+            await client.send(reset_msg)
+        except Exception:
+            pass
+
+
 async def broadcast_status_to_viewers():
     """Send current pipeline status to all connected viewer clients."""
-    if pipeline["running"]:
-        msg = json.dumps({
-            "type": "status",
-            "status": "capturing",
-            "buffer_seconds": pipeline["audio_delay"],
-            "chunk_seconds": pipeline["chunk_seconds"],
-        })
-    else:
-        msg = json.dumps({"type": "status", "status": "stopped"})
+    status_msg = _viewer_status_msg()
+    log.debug(f"Broadcasting status '{status_msg['status']}' to {len(connected_clients)} viewers")
+    msg = json.dumps(status_msg)
     if connected_clients:
         await asyncio.gather(
             *[client.send(msg) for client in list(connected_clients)],
@@ -306,12 +340,11 @@ async def broadcast_status_to_viewers():
         )
 
 
-def whisper_thread_fn(whisper_buffer, whisper_client, config):
+def transcription_thread_fn(transcription_buffer, transcriber, config):
     """Pull overlapping chunks from ring buffer and transcribe."""
-    log.info("Whisper thread started")
-    pipeline["chunk_seconds"] = int(config["CHUNK_SECONDS"])
-    pipeline["overlap_seconds"] = int(config["OVERLAP_SECONDS"])
-    next_position = whisper_buffer.write_position
+    log.info(f"Transcription thread started: chunk={pipeline['chunk_seconds']}s, "
+             f"overlap={pipeline['overlap_seconds']}s, delay={pipeline['audio_delay']:.1f}s")
+    next_position = transcription_buffer.write_position
     diarizer = pipeline.get("diarizer")
     translator = pipeline.get("translator")
 
@@ -355,22 +388,31 @@ def whisper_thread_fn(whisper_buffer, whisper_client, config):
             overlap_samples = overlap_secs * 16000
             step_samples = chunk_samples - overlap_samples
 
-            if whisper_buffer.write_position < next_position + chunk_samples:
+            if transcription_buffer.write_position < next_position + chunk_samples:
                 time.sleep(0.1)
                 continue
 
-            chunk = whisper_buffer.read_at(next_position, chunk_samples)
+            chunk = transcription_buffer.read_at(next_position, chunk_samples)
             if chunk is None:
-                next_position = max(0, whisper_buffer.write_position - chunk_samples)
+                next_position = max(0, transcription_buffer.write_position - chunk_samples)
                 continue
 
             chunk_offset = next_position / 16000.0
+
+            # Skip near-silent chunks — saves ~4s of wasted model processing
+            rms = (chunk.astype(np.float32) ** 2).mean() ** 0.5
+            peak = np.max(np.abs(chunk))
+            if rms < 50:
+                log.debug(f"Skipping silent chunk [{chunk_offset:.1f}s]: RMS={rms:.1f}, peak={peak}")
+                next_position += step_samples
+                continue
+            log.debug(f"Audio chunk [{chunk_offset:.1f}s]: RMS={rms:.1f}, peak={peak}, samples={len(chunk)}")
 
             try:
                 t0 = time.monotonic()
 
                 # Transcribe full chunk
-                segments = whisper_client.transcribe(
+                segments = transcriber.transcribe(
                     chunk,
                     chunk_offset_seconds=chunk_offset,
                     overlap_seconds=overlap_secs,
@@ -383,38 +425,17 @@ def whisper_thread_fn(whisper_buffer, whisper_client, config):
                 if pipeline.get("diarize_enabled", True) and diarizer:
                     try:
                         t1 = time.monotonic()
-                        speaker_segments = diarizer.diarize_chunk(chunk)
+                        speaker_segments = diarizer.diarize_chunk(
+                            chunk,
+                            overlap_samples=overlap_samples,
+                            chunk_offset=chunk_offset,
+                        )
                         diar_time = time.monotonic() - t1
                         log.info(f"Diarization: {diar_time:.1f}s | {len(speaker_segments)} speaker segments")
                     except Exception as e:
                         log.warning(f"Diarization error: {e}")
 
-                processing_time = transcription_time + diar_time
-
-                # Track rolling average processing time
-                if "transcription_times" not in pipeline:
-                    pipeline["transcription_times"] = []
-                pipeline["transcription_times"].append(processing_time)
-                pipeline["transcription_times"] = pipeline["transcription_times"][-10:]
-                avg_processing = sum(pipeline["transcription_times"]) / len(pipeline["transcription_times"])
-
-                required_delay = chunk_secs + avg_processing + 2  # 2s margin
-
-                log.info(
-                    f"Final: {processing_time:.1f}s (transcribe:{transcription_time:.1f}s + diarize:{diar_time:.1f}s) | "
-                    f"Required buffer: {required_delay:.1f}s | Current buffer: {pipeline['audio_delay']:.1f}s"
-                )
-
-                # Auto-adjust audio delay
-                if pipeline["audio_delay"] < required_delay:
-                    pipeline["audio_delay"] = required_delay
-                    save_settings()
-                    log.info(f"Auto-adjusted audio buffer UP to {required_delay:.1f}s")
-                elif pipeline["audio_delay"] > required_delay + 3 and len(pipeline.get("transcription_times", [])) >= 5:
-                    pipeline["audio_delay"] = required_delay
-                    save_settings()
-                    log.info(f"Auto-adjusted audio buffer DOWN to {required_delay:.1f}s")
-
+                log.debug(f"Transcription returned {len(segments) if segments else 0} segments")
                 if segments:
                     all_words = []
                     all_text = []
@@ -424,7 +445,7 @@ def whisper_thread_fn(whisper_buffer, whisper_client, config):
 
                     # Tag words with speaker IDs from diarization
                     if speaker_segments:
-                        _tag_words_with_speakers(all_words, speaker_segments, chunk_offset)
+                        _tag_words_with_speakers(all_words, speaker_segments)
 
                     combined_text = " ".join(all_text)
 
@@ -445,7 +466,7 @@ def whisper_thread_fn(whisper_buffer, whisper_client, config):
                     # Translate to each unique target language
                     translations = {}
                     translation_times = {}
-                    if pipeline.get("translate_enabled", True) and translator and detected_lang and len(combined_text.split()) >= 3:
+                    if pipeline.get("translate_enabled", True) and translator and detected_lang:
                         for tl in target_langs:
                             if tl == detected_lang:
                                 continue
@@ -470,6 +491,39 @@ def whisper_thread_fn(whisper_buffer, whisper_client, config):
                     }
                     pipeline["last_subtitle"] = subtitle
                     _enqueue_subtitle(subtitle)
+                    log.debug(f"Enqueued subtitle: {combined_text[:60]}...")
+
+                    # Track total processing time (including translation)
+                    translate_time = sum(translation_times.values()) if translation_times else 0
+                    processing_time = transcription_time + diar_time + translate_time
+
+                    if "transcription_times" not in pipeline:
+                        pipeline["transcription_times"] = []
+                    pipeline["transcription_times"].append(processing_time)
+                    pipeline["transcription_times"] = pipeline["transcription_times"][-10:]
+                    avg_processing = sum(pipeline["transcription_times"]) / len(pipeline["transcription_times"])
+
+                    margin = 1 if chunk_secs <= 3 else 2
+                    required_delay = chunk_secs + avg_processing + margin
+
+                    log.info(
+                        f"Final: {processing_time:.1f}s (transcribe:{transcription_time:.1f}s + diarize:{diar_time:.1f}s + translate:{translate_time:.1f}s) | "
+                        f"Required buffer: {required_delay:.1f}s | Current buffer: {pipeline['audio_delay']:.1f}s"
+                    )
+
+                    # Auto-adjust audio delay (runtime only, not persisted)
+                    step_secs = chunk_secs - overlap_secs
+                    if avg_processing > step_secs and len(pipeline.get("transcription_times", [])) >= 3:
+                        log.warning(
+                            f"Processing ({avg_processing:.1f}s) exceeds step time ({step_secs:.1f}s) — "
+                            f"audio will drift. Consider increasing chunk_seconds or disabling translation."
+                        )
+                    if pipeline["audio_delay"] < required_delay:
+                        pipeline["audio_delay"] = required_delay
+                        log.info(f"Auto-adjusted audio buffer UP to {required_delay:.1f}s")
+                    elif pipeline["audio_delay"] > required_delay + 3 and len(pipeline.get("transcription_times", [])) >= 5:
+                        pipeline["audio_delay"] = required_delay
+                        log.info(f"Auto-adjusted audio buffer DOWN to {required_delay:.1f}s")
 
                     # Update stats
                     pipeline["stats"] = {
@@ -479,7 +533,7 @@ def whisper_thread_fn(whisper_buffer, whisper_client, config):
                         "detected_language": detected_lang,
                     }
             except Exception as e:
-                log.warning(f"Whisper error: {e}", exc_info=True)
+                log.warning(f"Transcription error: {e}", exc_info=True)
                 _enqueue_subtitle({
                     "type": "subtitle",
                     "text": "Transcription unavailable",
@@ -490,108 +544,224 @@ def whisper_thread_fn(whisper_buffer, whisper_client, config):
 
             next_position += step_samples
     except Exception as e:
-        log.error(f"Whisper thread error: {e}")
+        log.error(f"Transcription thread error: {e}")
     finally:
-        log.info("Whisper thread stopped")
+        log.info("Transcription thread stopped")
 
 
-def _create_whisper_client(config):
-    """Create and return a whisper client based on config."""
-    if config.get("USE_LOCAL_MODEL", "").lower() in ("1", "true", "yes"):
-        return LocalTranscriber(
-            model_name=config.get("LOCAL_MODEL", "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit"),
-            delay_ms=int(config.get("TRANSCRIPTION_DELAY_MS", "480")),
-        )
-    else:
-        return WhisperClient(
-            endpoint=config["WHISPER_ENDPOINT"],
-            model=config["WHISPER_MODEL"],
-            api_key=config.get("WHISPER_API_KEY") or None,
-            timeout=60.0,
-            omlx=config.get("WHISPER_OMLX", "").lower() in ("1", "true", "yes"),
-        )
+def streaming_transcription_thread_fn(transcription_buffer, config):
+    """Streaming transcription for realtime mode — feeds audio continuously."""
+    log.info("Streaming transcription thread started")
+
+    model_name = config.get("LOCAL_MODEL", "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit")
+    # Use lower delay for streaming — trades accuracy for speed
+    delay_ms = int(config.get("STREAMING_DELAY_MS", "320"))
+    streamer = StreamingTranscriber(model_name=model_name, delay_ms=delay_ms)
+    log.info(f"Streaming transcriber ready: delay={delay_ms}ms")
+
+    translator = pipeline.get("translator")
+    detect_lang = None
+    if translator:
+        try:
+            from langdetect import detect
+            detect_lang = detect
+        except ImportError:
+            log.warning("langdetect not installed — language detection disabled")
+
+    # Read position in the transcription buffer (16kHz)
+    read_pos = transcription_buffer.write_position
+    # Feed audio in small chunks: 80ms at 16kHz = 1280 samples
+    feed_size = 1280
+    total_fed = 0
+    first_result_logged = False
+    last_partial_time = 0.0
+    last_partial_text = ""
+    PARTIAL_INTERVAL = 0.15  # rate-limit partials to avoid flashing
+
+    try:
+        while pipeline["running"]:
+            # Feed any available audio
+            available = transcription_buffer.write_position - read_pos
+            fed_this_round = 0
+            if available >= feed_size:
+                while available >= feed_size and pipeline["running"]:
+                    chunk = transcription_buffer.read_at(read_pos, feed_size)
+                    if chunk is not None:
+                        # Always feed in streaming mode — model handles silence
+                        # with PAD tokens, which we use for sentence boundary detection
+                        streamer.feed(chunk)
+                        fed_this_round += feed_size
+                        read_pos += feed_size
+                        available = transcription_buffer.write_position - read_pos
+                    else:
+                        break
+                total_fed += fed_this_round
+                if fed_this_round > 0 and total_fed <= feed_size * 20:
+                    log.debug(f"Streaming: fed {fed_this_round} samples (total: {total_fed}, {total_fed/16000:.1f}s)")
+
+            # Poll for results
+            results = streamer.poll()
+            if results and not first_result_logged:
+                log.info(f"Streaming: first result after {total_fed/16000:.1f}s of audio — {results[0]}")
+                first_result_logged = True
+            for r in results:
+                if r["type"] == "partial":
+                    now = time.monotonic()
+                    # Rate-limit partials and skip if text unchanged
+                    if r["text"] != last_partial_text and now - last_partial_time >= PARTIAL_INTERVAL:
+                        _enqueue_subtitle({
+                            "type": "partial",
+                            "text": r["text"],
+                        })
+                        last_partial_time = now
+                        last_partial_text = r["text"]
+                elif r["type"] == "final":
+                    last_partial_text = ""  # reset for next sentence
+                    text = r["text"]
+                    # Detect language and translate
+                    detected_lang = None
+                    if detect_lang and text.strip():
+                        try:
+                            detected_lang = detect_lang(text)
+                        except Exception:
+                            detected_lang = None
+
+                    translations = {}
+                    if pipeline.get("translate_enabled", True) and translator and detected_lang:
+                        target_langs = set()
+                        for ws, cs in client_state.items():
+                            if ws in active_clients:
+                                target_langs.add(cs.get("target_language", "en"))
+                        for tl in target_langs:
+                            if tl == detected_lang:
+                                continue
+                            try:
+                                t0 = time.monotonic()
+                                tr = translator.translate(text, detected_lang, tl)
+                                log.info(f"Streaming translation: {time.monotonic()-t0:.2f}s ({detected_lang}->{tl})")
+                                translations[tl] = tr
+                            except Exception as e:
+                                log.warning(f"Streaming translation error: {e}")
+
+                    log.info(f"Streaming final: '{text[:50]}' lang={detected_lang} "
+                             f"translations={list(translations.keys()) if translations else 'none'}")
+                    _enqueue_subtitle({
+                        "type": "subtitle",
+                        "text": text,
+                        "translations": translations,
+                        "detected_language": detected_lang,
+                        "start": r.get("start", 0),
+                        "end": r.get("end", 0),
+                        "words": [],
+                    })
+
+            # Small sleep to avoid busy-waiting but keep latency low
+            time.sleep(0.02)
+
+    except Exception as e:
+        log.error(f"Streaming transcription thread error: {e}", exc_info=True)
+    finally:
+        streamer.reset()
+        log.info("Streaming transcription thread stopped")
+
+
+def _create_transcriber(config):
+    """Create and return a local transcriber."""
+    return LocalTranscriber(
+        model_name=config.get("LOCAL_MODEL", "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit"),
+        delay_ms=int(config.get("TRANSCRIPTION_DELAY_MS", "480")),
+    )
 
 
 def _start_pipeline_common(config):
-    """Common pipeline setup shared by all start functions. Returns (capture, whisper_buffer)."""
+    """Common pipeline setup shared by all start functions. Returns (capture, transcription_buffer)."""
     if pipeline["running"]:
         return None, None
 
     buffer_seconds = int(config["BUFFER_SECONDS"])
     playback_buffer = RingBuffer(buffer_seconds=buffer_seconds, sample_rate=48000)
-    whisper_buffer = RingBuffer(buffer_seconds=buffer_seconds, sample_rate=16000)
+    transcription_buffer = RingBuffer(buffer_seconds=buffer_seconds, sample_rate=16000)
     pipeline["playback_buffer"] = playback_buffer
-    pipeline["whisper_buffer"] = whisper_buffer
+    pipeline["transcription_buffer"] = transcription_buffer
 
-    capture = AudioCapture(playback_buffer, whisper_buffer)
+    capture = AudioCapture(playback_buffer, transcription_buffer)
     pipeline["audio_capture"] = capture
-    pipeline["whisper_client"] = _create_whisper_client(config)
+    pipeline["transcriber"] = _create_transcriber(config)
     pipeline["audio_encoder"] = AudioEncoder(sample_rate=48000, channels=1)
 
-    return capture, whisper_buffer
+    return capture, transcription_buffer
 
 
-def _finish_pipeline_start(config, whisper_buffer):
-    """Start whisper thread and mark pipeline as running."""
+def _finish_pipeline_start(config, transcription_buffer):
+    """Start transcription thread and mark pipeline as running."""
+    pipeline["_generation"] = pipeline.get("_generation", 0) + 1
     pipeline["running"] = True
-    pipeline["whisper_thread"] = threading.Thread(
-        target=whisper_thread_fn, args=(whisper_buffer, pipeline["whisper_client"], config), daemon=True
-    )
-    pipeline["whisper_thread"].start()
+    pipeline["status"] = "buffering"
+    is_realtime = pipeline.get("mode") == "realtime"
+    if is_realtime:
+        pipeline["transcription_thread"] = threading.Thread(
+            target=streaming_transcription_thread_fn, args=(transcription_buffer, config), daemon=True
+        )
+    else:
+        pipeline["transcription_thread"] = threading.Thread(
+            target=transcription_thread_fn, args=(transcription_buffer, pipeline["transcriber"], config), daemon=True
+        )
+    pipeline["transcription_thread"].start()
     log.info("Pipeline started")
 
 
 def start_pipeline(config):
     """Start the audio capture and transcription pipeline (system audio)."""
-    capture, whisper_buffer = _start_pipeline_common(config)
+    capture, transcription_buffer = _start_pipeline_common(config)
     if capture is None:
         return None
 
     original_device = capture.start()
     pipeline["original_output_device"] = original_device
 
-    _finish_pipeline_start(config, whisper_buffer)
+    _finish_pipeline_start(config, transcription_buffer)
     return original_device
 
 
 def start_pipeline_mic(config, mic_device=None):
     """Start the pipeline capturing from microphone only."""
-    capture, whisper_buffer = _start_pipeline_common(config)
+    capture, transcription_buffer = _start_pipeline_common(config)
     if capture is None:
         return None
 
     capture.start_mic(mic_device)
     pipeline["original_output_device"] = None
 
-    _finish_pipeline_start(config, whisper_buffer)
+    _finish_pipeline_start(config, transcription_buffer)
     return None
 
 
 def start_pipeline_both(config, mic_device=None):
     """Start the pipeline capturing from both system audio and microphone."""
-    capture, whisper_buffer = _start_pipeline_common(config)
+    capture, transcription_buffer = _start_pipeline_common(config)
     if capture is None:
         return None
 
     original_device = capture.start_both(mic_device)
     pipeline["original_output_device"] = original_device
 
-    _finish_pipeline_start(config, whisper_buffer)
+    _finish_pipeline_start(config, transcription_buffer)
     return original_device
 
 
 def stop_pipeline():
     """Stop the audio capture and transcription pipeline."""
     pipeline["running"] = False
+    pipeline["status"] = "stopped"
 
     if pipeline["audio_capture"]:
         pipeline["audio_capture"].stop()
         pipeline["audio_capture"] = None
 
-    if pipeline["whisper_thread"]:
+    if pipeline["transcription_thread"]:
         # Thread checks pipeline["running"] and will exit on its own
-        pipeline["whisper_thread"].join(timeout=1)
-        pipeline["whisper_thread"] = None
+        pipeline["transcription_thread"].join(timeout=1)
+        pipeline["transcription_thread"] = None
 
     # Reset speaker tracking but keep model loaded (expensive to reload)
     if pipeline.get("diarizer"):
@@ -606,18 +776,20 @@ def stop_pipeline():
                 break
 
     pipeline["playback_buffer"] = None
-    pipeline["whisper_buffer"] = None
-    pipeline["whisper_client"] = None
+    pipeline["transcription_buffer"] = None
+    pipeline["transcriber"] = None
     pipeline["audio_encoder"] = None
     pipeline["original_output_device"] = None
-    pipeline["chunk_seconds"] = SETTINGS_DEFAULTS["chunk_seconds"]
-    pipeline["overlap_seconds"] = SETTINGS_DEFAULTS["overlap_seconds"]
+    pipeline.pop("_audio_logged", None)
+    pipeline.pop("transcription_times", None)
 
     log.info("Pipeline stopped")
 
 
 async def broadcast_audio():
     """Read from ring buffer with delay, encode to WAV, broadcast to clients."""
+    pipeline_generation = 0  # track pipeline restarts
+
     while True:
         # Wait for pipeline to start
         while not pipeline["running"]:
@@ -625,6 +797,7 @@ async def broadcast_audio():
 
         playback_buffer = pipeline["playback_buffer"]
         encoder = pipeline["audio_encoder"]
+        current_gen = pipeline.get("_generation", 0)
 
         if not playback_buffer or not encoder:
             await asyncio.sleep(0.1)
@@ -632,22 +805,37 @@ async def broadcast_audio():
 
         # Wait for enough audio to start playback at the configured delay
         delay_samples = int(pipeline["audio_delay"] * 48000)
-        while pipeline["running"]:
+        log.info(f"Waiting for audio buffer to fill: need {delay_samples} samples ({pipeline['audio_delay']:.1f}s)")
+        while pipeline["running"] and pipeline.get("_generation", 0) == current_gen:
             if playback_buffer.write_position >= delay_samples:
                 break
             await asyncio.sleep(0.1)
 
-        # 200ms chunks at 48kHz = 9600 samples
-        chunk_size = 9600
+        # If generation changed, loop back to pick up new buffer
+        if pipeline.get("_generation", 0) != current_gen:
+            continue
+
+        # Buffer filled — transition to capturing
+        pipeline["status"] = "capturing"
+        log.info(f"Audio buffer filled ({pipeline['audio_delay']:.1f}s) — now broadcasting")
+        try:
+            await broadcast_status_to_viewers()
+            await push_state_to_admins()
+        except Exception as e:
+            log.warning(f"Status broadcast error on buffer fill: {e}")
+
+        # 50ms chunks at 48kHz = 2400 samples (low latency for realtime)
+        chunk_size = 2400 if pipeline.get("mode") == "realtime" else 9600
         read_position = 0
 
-        while pipeline["running"]:
+        while pipeline["running"] and pipeline.get("_generation", 0) == current_gen:
             if not pipeline.get("broadcast_audio", True):
                 await asyncio.sleep(0.1)
                 continue
 
-            target_position = playback_buffer.write_position - int(pipeline["audio_delay"] * 48000)
-            if target_position < 0:
+            delay_offset = int(pipeline["audio_delay"] * 48000)
+            target_position = playback_buffer.write_position - delay_offset
+            if target_position < chunk_size:
                 await asyncio.sleep(0.05)
                 continue
 
@@ -656,6 +844,16 @@ async def broadcast_audio():
                 read_position = target_position
             elif read_position < target_position - 48000:
                 read_position = target_position
+
+            # Don't read ahead of target — prevents audio drift vs subtitles
+            if read_position >= target_position:
+                await asyncio.sleep(0.01)
+                continue
+
+            # Don't read past what's available
+            if read_position + chunk_size > playback_buffer.write_position:
+                await asyncio.sleep(0.01)
+                continue
 
             chunk = playback_buffer.read_at(read_position, chunk_size)
             if chunk is None:
@@ -667,23 +865,32 @@ async def broadcast_audio():
             read_position += chunk_size
 
             try:
-                wav_chunk = encoder.encode_wav_chunk(chunk)
+                # Send raw PCM bytes (int16, mono, 48kHz) — client decodes synchronously
+                raw_pcm = chunk.tobytes()
+                if not pipeline.get("_audio_logged"):
+                    log.info(f"First audio chunk sent to {len(active_clients)} clients (stream_time={stream_time:.1f}s)")
+                    pipeline["_audio_logged"] = True
                 if active_clients:
-                    # Send stream position so client can sync subtitles
-                    sync_msg = json.dumps({"type": "audio_sync", "stream_time": stream_time})
+                    # Send stream position periodically so client can sync subtitles
+                    # (every ~200ms regardless of chunk size to avoid flooding)
+                    chunks_since_sync = getattr(broadcast_audio, '_chunks_since_sync', 0)
+                    if chunks_since_sync == 0 or chunks_since_sync * chunk_size >= 9600:
+                        sync_msg = json.dumps({"type": "audio_sync", "stream_time": stream_time})
+                        await asyncio.gather(
+                            *[client.send(sync_msg) for client in active_clients],
+                            return_exceptions=True,
+                        )
+                        broadcast_audio._chunks_since_sync = 0
+                    broadcast_audio._chunks_since_sync = getattr(broadcast_audio, '_chunks_since_sync', 0) + 1
                     await asyncio.gather(
-                        *[client.send(sync_msg) for client in active_clients],
-                        return_exceptions=True,
-                    )
-                    await asyncio.gather(
-                        *[client.send(wav_chunk) for client in active_clients],
+                        *[client.send(raw_pcm) for client in active_clients],
                         return_exceptions=True,
                     )
             except Exception as e:
                 log.warning(f"Broadcast error: {e}")
 
-            # 200ms of audio at 48kHz
-            await asyncio.sleep(0.19)
+            # Sleep slightly less than chunk duration to stay ahead
+            await asyncio.sleep(0.04 if chunk_size <= 2400 else 0.19)
 
 
 async def broadcast_subtitles():
@@ -693,25 +900,47 @@ async def broadcast_subtitles():
             subtitle = await asyncio.wait_for(
                 pipeline["subtitle_queue"].get(), timeout=0.5
             )
-            if active_clients:
-                for client in list(active_clients):
-                    try:
-                        cs = client_state.get(client, {})
-                        tl = cs.get("target_language", "en")
-                        client_translations = subtitle.get("translations", {})
-                        msg = json.dumps({
-                            **subtitle,
-                            "translation": client_translations.get(tl),
-                            "target_language": tl,
-                            "translations": None,
-                        })
-                        await client.send(msg)
-                    except Exception:
-                        pass
+            if not active_clients:
+                continue
+
+            # Partial subtitles — broadcast raw text immediately, no per-client translation
+            if subtitle.get("type") == "partial":
+                msg = json.dumps(subtitle)
+                await asyncio.gather(
+                    *[client.send(msg) for client in list(active_clients)],
+                    return_exceptions=True,
+                )
+                continue
+
+            log.debug(f"Broadcasting subtitle to {len(active_clients)} active clients")
+            for client in list(active_clients):
+                try:
+                    cs = client_state.get(client, {})
+                    tl = cs.get("target_language", "en")
+                    client_translations = subtitle.get("translations", {})
+                    msg = json.dumps({
+                        **subtitle,
+                        "translation": client_translations.get(tl),
+                        "target_language": tl,
+                        "translations": None,
+                    })
+                    await client.send(msg)
+                except Exception:
+                    pass
         except asyncio.TimeoutError:
             continue
         except Exception as e:
             log.warning(f"Subtitle broadcast error: {e}")
+
+
+async def push_state_to_admins():
+    """Push current admin state once to all admin clients."""
+    if admin_clients:
+        msg = json.dumps(get_admin_state())
+        await asyncio.gather(
+            *[client.send(msg) for client in list(admin_clients)],
+            return_exceptions=True,
+        )
 
 
 async def push_admin_stats():
@@ -747,17 +976,12 @@ async def handle_websocket(websocket):
     }))
 
     # Send current pipeline state so reconnecting clients show the right UI
+    status_msg = _viewer_status_msg()
+    log.debug(f"Sending status to new client: {status_msg['status']} (running={pipeline['running']}, active={len(active_clients)})")
+    await websocket.send(json.dumps(status_msg))
     if pipeline["running"]:
-        await websocket.send(json.dumps({
-            "type": "status",
-            "status": "capturing",
-            "buffer_seconds": pipeline["audio_delay"],
-            "chunk_seconds": pipeline["chunk_seconds"],
-        }))
-        # Auto-add to active clients if pipeline is already running
         active_clients.add(websocket)
-    else:
-        await websocket.send(json.dumps({"type": "status", "status": "stopped"}))
+        log.debug(f"Added client to active_clients ({len(active_clients)} active)")
 
     try:
         async for message in websocket:
@@ -822,24 +1046,76 @@ async def handle_admin_websocket(websocket):
             elif msg_type == "mode":
                 mode = data.get("mode", "synced")
                 if mode in MODE_PRESETS:
+                    was_running = pipeline["running"]
+                    old_mode = pipeline.get("mode")
                     pipeline["mode"] = mode
                     preset = MODE_PRESETS[mode]
                     for k, v in preset.items():
                         pipeline[k] = v
                     save_settings()
-                    log.info(f"Mode set to {mode}")
+                    log.info(f"Mode set to {mode}: chunk={pipeline['chunk_seconds']}s, "
+                             f"translate={pipeline['translate_enabled']}, diarize={pipeline['diarize_enabled']}, "
+                             f"audio_delay={pipeline['audio_delay']:.1f}s")
+                    # Restart pipeline if running so new settings take effect cleanly
+                    if was_running:
+                        config = load_config()
+                        audio_source = pipeline.get("audio_source", "system")
+                        mic_device = pipeline.get("mic_device")
+                        stop_pipeline()
+                        # Restore mode settings (stop_pipeline resets chunk/overlap to defaults)
+                        for k, v in preset.items():
+                            pipeline[k] = v
+                        pipeline["mode"] = mode
+                        active_clients.clear()
+                        if audio_source == "mic":
+                            start_pipeline_mic(config, mic_device=mic_device)
+                        elif audio_source == "both":
+                            start_pipeline_both(config, mic_device=mic_device)
+                        else:
+                            start_pipeline(config)
+                        active_clients.update(connected_clients)
+                        await broadcast_status_to_viewers()
+                    await _notify_viewers_settings_changed()
 
             elif msg_type == "audio_source":
-                pipeline["audio_source"] = data.get("source", "system")
-                pipeline["mic_device"] = data.get("device")
-                log.info(f"Audio source set to {pipeline['audio_source']} (mic: {pipeline['mic_device']})")
+                new_source = data.get("source", "system")
+                new_mic = data.get("device")
+                old_source = pipeline.get("audio_source")
+                pipeline["audio_source"] = new_source
+                pipeline["mic_device"] = new_mic
+                save_settings()
+                log.info(f"Audio source set to {new_source} (mic: {new_mic})")
+                # If pipeline is running, restart with new source
+                if pipeline["running"]:
+                    config = load_config()
+                    # Preserve current mode settings across restart
+                    mode = pipeline.get("mode", "synced")
+                    mode_settings = {k: pipeline[k] for k in MODE_PRESETS.get(mode, {}) if k in pipeline}
+                    log.info(f"Restarting pipeline for audio source change: {old_source} -> {new_source}")
+                    stop_pipeline()
+                    for k, v in mode_settings.items():
+                        pipeline[k] = v
+                    pipeline["audio_source"] = new_source
+                    pipeline["mic_device"] = new_mic
+                    active_clients.clear()
+                    if new_source == "mic":
+                        start_pipeline_mic(config, mic_device=new_mic)
+                    elif new_source == "both":
+                        start_pipeline_both(config, mic_device=new_mic)
+                    else:
+                        start_pipeline(config)
+                    active_clients.update(connected_clients)
+                    await broadcast_status_to_viewers()
 
             elif msg_type == "toggle":
                 feature = data.get("feature")
                 enabled = data.get("enabled")
                 if feature in ("broadcast_audio", "translate_enabled", "diarize_enabled"):
                     pipeline[feature] = bool(enabled) if enabled is not None else not pipeline.get(feature, True)
+                    save_settings()
                     log.info(f"{feature} set to {pipeline[feature]}")
+                    if feature == "translate_enabled":
+                        await _notify_viewers_settings_changed()
 
             elif msg_type == "tuning":
                 needs_sync_reset = False
@@ -898,8 +1174,7 @@ async def main():
     pipeline["default_target_language"] = config.get("TARGET_LANGUAGE", "en")
 
     # Preload models on startup so first transcription is fast
-    if config.get("USE_LOCAL_MODEL", "").lower() in ("1", "true", "yes"):
-        preload_model(config.get("LOCAL_MODEL", "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit"))
+    preload_model(config.get("LOCAL_MODEL", "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit"))
     pipeline["diarizer"] = create_diarizer(config)
     pipeline["translator"] = create_translator(config)
 

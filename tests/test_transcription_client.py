@@ -1,21 +1,5 @@
 import numpy as np
-from unittest.mock import AsyncMock, patch, MagicMock
-import asyncio
-import json
-from whisper_client import WhisperClient, TranscriptionResult, deduplicate_segments
-
-
-def test_build_wav_bytes():
-    """WAV bytes have correct header for 16kHz 16-bit mono."""
-    client = WhisperClient(
-        endpoint="http://localhost/v1/audio/transcriptions",
-        model="whisper-v3-turbo",
-    )
-    pcm = np.zeros(16000, dtype=np.int16)  # 1 second
-    wav = client._build_wav(pcm)
-    assert wav[:4] == b"RIFF"
-    assert wav[8:12] == b"WAVE"
-    assert len(wav) == 44 + 32000  # 44-byte header + data
+from transcription_client import TranscriptionResult, deduplicate_segments
 
 
 def test_deduplicate_segments_no_overlap():
@@ -37,8 +21,22 @@ def test_deduplicate_segments_removes_overlap():
         TranscriptionResult(text="the quick brown fox", start=1.0, end=3.0, words=[]),
     ]
     curr = [
-        TranscriptionResult(text="brown fox", start=0.0, end=1.0, words=[]),
-        TranscriptionResult(text="jumps over", start=1.0, end=2.0, words=[]),
+        TranscriptionResult(
+            text="brown fox",
+            start=0.0, end=1.5,
+            words=[
+                {"word": "brown", "start": 0.0, "end": 0.7},
+                {"word": "fox", "start": 0.7, "end": 1.5},
+            ],
+        ),
+        TranscriptionResult(
+            text="jumps over",
+            start=2.0, end=3.5,
+            words=[
+                {"word": "jumps", "start": 2.0, "end": 2.5},
+                {"word": "over", "start": 2.5, "end": 3.5},
+            ],
+        ),
     ]
     result = deduplicate_segments(prev, curr, overlap_seconds=2)
     assert len(result) == 1

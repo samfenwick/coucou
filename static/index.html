@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Coucou</title>
-    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#0a0a0a">
     <link rel="manifest" href="manifest.json">
@@ -25,7 +25,10 @@
 
         <div id="toolbar">
             <div class="toolbar-left">
-                <span id="connection-status">Disconnected</span>
+                <div class="status-stack">
+                    <span id="connection-status">Disconnected</span>
+                    <span id="broadcast-status">Not Broadcasting</span>
+                </div>
             </div>
             <div class="toolbar-center">
                 <div class="volume-bar">
@@ -99,6 +102,35 @@
                             <option value="default">Default output</option>
                         </select>
                         <button id="refresh-outputs" class="btn-icon" title="Refresh">&#x21bb;</button>
+                    </div>
+                </section>
+
+                <section class="setting-section">
+                    <h3>Display</h3>
+                    <div class="setting-row">
+                        <label class="toggle-label">
+                            <input type="checkbox" id="show-original-toggle" checked>
+                            <span class="toggle-switch blue"></span>
+                            Show original text
+                        </label>
+                    </div>
+                </section>
+
+                <section class="setting-section">
+                    <h3>Word Highlighting</h3>
+                    <div class="setting-row">
+                        <label class="toggle-label">
+                            <input type="checkbox" id="word-highlight-toggle" checked>
+                            <span class="toggle-switch blue"></span>
+                            Original text
+                        </label>
+                    </div>
+                    <div class="setting-row" style="margin-top: 0.4rem;">
+                        <label class="toggle-label">
+                            <input type="checkbox" id="translation-highlight-toggle">
+                            <span class="toggle-switch"></span>
+                            Translation (approximate)
+                        </label>
                     </div>
                 </section>
 

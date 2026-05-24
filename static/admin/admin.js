@@ -66,7 +66,12 @@ function applyState(data) {
     const badge = $("#pipeline-status");
     const statusText = $("#status-text");
     const btn = $("#start-stop");
-    if (data.running) {
+    if (data.status === "buffering") {
+        badge.className = "status-badge buffering";
+        statusText.textContent = "Buffering";
+        btn.textContent = "Stop";
+        btn.className = "btn-start running";
+    } else if (data.running) {
         badge.className = "status-badge running";
         statusText.textContent = "Running";
         btn.textContent = "Stop";
@@ -99,11 +104,14 @@ function applyState(data) {
     $("#toggle-translation").checked = data.translate_enabled ?? true;
     $("#toggle-diarization").checked = data.diarize_enabled ?? true;
 
-    // Tuning
+    // Tuning — disabled in realtime (streaming mode, no chunks)
+    const isRealtime = (data.mode || "synced") === "realtime";
     state.chunk_seconds = data.chunk_seconds || 10;
     state.overlap_seconds = data.overlap_seconds || 2;
-    $("#chunk-value").textContent = `${state.chunk_seconds}s`;
-    $("#overlap-value").textContent = `${state.overlap_seconds}s`;
+    $("#chunk-value").textContent = isRealtime ? "—" : `${state.chunk_seconds}s`;
+    $("#overlap-value").textContent = isRealtime ? "—" : `${state.overlap_seconds}s`;
+    $$(".step-btn").forEach(btn => btn.disabled = isRealtime);
+    $("#tuning-section").classList.toggle("disabled", isRealtime);
 
     // Stats
     $("#stat-clients").textContent = data.clients ?? 0;

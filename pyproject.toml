@@ -1,15 +1,24 @@
 [project]
-name = "subcurrent"
+name = "coucou"
 version = "0.1.0"
-description = "Real-time audio captioning with synced subtitles"
+description = "Real-time audio transcription, translation, and speaker diarization — runs locally on Apple Silicon"
+license = {text = "MIT"}
 requires-python = ">=3.10"
+keywords = ["transcription", "subtitles", "voxtral", "mlx", "diarization", "translation", "apple-silicon"]
 dependencies = [
     "websockets>=12.0,<14.0",
     "numpy>=1.24,<3.0",
-    "httpx>=0.27,<1.0",
     "sounddevice>=0.5,<1.0",
-    "pytest>=9.0.3",
+    "mlx-audio[stt]>=0.4.3",
+    "mlx-lm>=0.29",
+    "langdetect>=1.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/samfenwick/coucou"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.uv]
 exclude-newer = "7 days"

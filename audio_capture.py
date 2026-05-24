@@ -8,7 +8,7 @@ log = logging.getLogger(__name__)
 
 BLACKHOLE_DEVICE = "BlackHole 2ch"
 CAPTURE_RATE = 48000  # native capture rate for quality playback
-WHISPER_RATE = 16000  # Whisper expects 16kHz
+TRANSCRIPTION_RATE = 16000  # transcription models expect 16kHz
 
 
 def find_blackhole_index():
@@ -47,12 +47,12 @@ class AudioCapture:
 
     Writes to two ring buffers:
     - playback_buffer: 48kHz for high-quality audio streaming
-    - whisper_buffer: 16kHz downsampled for transcription
+    - transcription_buffer: 16kHz downsampled for transcription
     """
 
-    def __init__(self, playback_buffer, whisper_buffer):
+    def __init__(self, playback_buffer, transcription_buffer):
         self._playback_buffer = playback_buffer
-        self._whisper_buffer = whisper_buffer
+        self._transcription_buffer = transcription_buffer
         self._stream = None
         self._original_output = None
 
@@ -62,7 +62,8 @@ class AudioCapture:
 
         self._original_output = get_current_output()
         set_output(BLACKHOLE_DEVICE)
-        log.info(f"Audio output switched to {BLACKHOLE_DEVICE} (was: {self._original_output})")
+        actual = get_current_output()
+        log.info(f"Audio output switched to {BLACKHOLE_DEVICE} (was: {self._original_output}, verified: {actual})")
 
         self._stream = sd.InputStream(
             device=device_index,
@@ -161,7 +162,7 @@ class AudioCapture:
             samples_48k = (mixed * 32767).astype(np.int16)
             self._playback_buffer.write(samples_48k)
             samples_16k = downsample_48_to_16(samples_48k)
-            self._whisper_buffer.write(samples_16k)
+            self._transcription_buffer.write(samples_16k)
 
         self._mic_stream = sd.InputStream(
             device=mic_index,
@@ -212,4 +213,4 @@ class AudioCapture:
         self._playback_buffer.write(samples_48k)
 
         samples_16k = downsample_48_to_16(samples_48k)
-        self._whisper_buffer.write(samples_16k)
+        self._transcription_buffer.write(samples_16k)
