@@ -58,7 +58,7 @@ def deduplicate_segments(previous, current, overlap_seconds):
     if not trimmed:
         return current
 
-    # Pass 2: text dedup — build a set of phrases from previous transcription
+    # Pass 2: text dedup  - build a set of phrases from previous transcription
     prev_text = " ".join(seg.text.lower().strip() for seg in previous)
     result = []
     for seg in trimmed:

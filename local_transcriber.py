@@ -1,6 +1,6 @@
 """Local Voxtral transcription using mlx-audio on Apple Silicon.
 
-Runs the model in-process — no external API needed.
+Runs the model in-process  - no external API needed.
 Model is cached in ~/.cache/huggingface after first download.
 Extracts word-level timestamps from token positions (each token = 80ms of audio).
 """
@@ -66,7 +66,7 @@ def _extract_words_from_tokens(generated, tokenizer, ms_per_token=80, delay_toke
 
     Each token position corresponds to ms_per_token ms of audio.
     Pad tokens (32) = silence, text tokens = speech.
-    The model has a transcription delay of delay_tokens — a text token
+    The model has a transcription delay of delay_tokens  - a text token
     at position i describes audio at position (i - delay_tokens).
     """
     words = []
@@ -196,14 +196,14 @@ class StreamingTranscriber:
         """Generate tokens and return results. Must be called from MLX thread.
 
         Returns list of dicts:
-          {"type": "partial", "text": "..."} — live updating text
-          {"type": "final", "text": "...", "start": float, "end": float} — completed sentence
+          {"type": "partial", "text": "..."}  - live updating text
+          {"type": "final", "text": "...", "start": float, "end": float}  - completed sentence
         """
         if self._session is None:
             return []
 
         results = []
-        # Step to generate tokens — use small batch for low latency
+        # Step to generate tokens  - use small batch for low latency
         deltas = self._session.step(max_decode_tokens=4)
 
         # Check for new tokens
@@ -224,7 +224,7 @@ class StreamingTranscriber:
                 self._last_text_time = time.monotonic()
                 has_text = True
 
-        # Only decode tokens since last final — avoids growing cost
+        # Only decode tokens since last final  - avoids growing cost
         recent_tokens = [t for t in generated[self._final_token_pos:] if t not in (PAD_TOKEN, EOS_TOKEN)]
         if not recent_tokens:
             return results

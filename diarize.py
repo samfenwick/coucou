@@ -46,7 +46,7 @@ class Diarizer:
 
         chunk_duration = len(pcm_int16) / sample_rate
 
-        # Only feed new audio — skip the overlap region that was already
+        # Only feed new audio  - skip the overlap region that was already
         # processed in the previous chunk. First chunk gets everything.
         if self._cumulative_seconds > 0 and overlap_samples > 0:
             new_audio = pcm_int16[overlap_samples:]
@@ -115,7 +115,7 @@ class Diarizer:
 
 
 def create_diarizer(config):
-    """Create a Diarizer. Always available — no HF token needed."""
+    """Create a Diarizer. Always available  - no HF token needed."""
     if config.get("DIARIZE", "true").lower() in ("0", "false", "no"):
         log.info("Diarization disabled via config")
         return None

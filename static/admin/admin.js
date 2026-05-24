@@ -104,12 +104,12 @@ function applyState(data) {
     $("#toggle-translation").checked = data.translate_enabled ?? true;
     $("#toggle-diarization").checked = data.diarize_enabled ?? true;
 
-    // Tuning — disabled in realtime (streaming mode, no chunks)
+    // Tuning  - disabled in realtime (streaming mode, no chunks)
     const isRealtime = (data.mode || "synced") === "realtime";
     state.chunk_seconds = data.chunk_seconds || 10;
     state.overlap_seconds = data.overlap_seconds || 2;
-    $("#chunk-value").textContent = isRealtime ? "—" : `${state.chunk_seconds}s`;
-    $("#overlap-value").textContent = isRealtime ? "—" : `${state.overlap_seconds}s`;
+    $("#chunk-value").textContent = isRealtime ? "-" : `${state.chunk_seconds}s`;
+    $("#overlap-value").textContent = isRealtime ? "-" : `${state.overlap_seconds}s`;
     $$(".step-btn").forEach(btn => btn.disabled = isRealtime);
     $("#tuning-section").classList.toggle("disabled", isRealtime);
 
@@ -117,14 +117,14 @@ function applyState(data) {
     $("#stat-clients").textContent = data.clients ?? 0;
     $("#stat-buffer").innerHTML = data.running
         ? `${data.buffer_seconds ?? 0}<span class="stat-unit">s</span>`
-        : '—';
-    const srcFlag = data.detected_language ? (LANG_FLAGS[data.detected_language] || data.detected_language) : "—";
+        : ' -';
+    const srcFlag = data.detected_language ? (LANG_FLAGS[data.detected_language] || data.detected_language) : "-";
     $("#stat-source").textContent = srcFlag;
 
     // Processing
     const proc = data.processing || {};
-    $("#proc-transcription").textContent = data.running ? `${proc.transcription || 0}s` : "—";
-    $("#proc-diarization").textContent = data.running ? `${proc.diarization || 0}s` : "—";
+    $("#proc-transcription").textContent = data.running ? `${proc.transcription || 0}s` : "-";
+    $("#proc-diarization").textContent = data.running ? `${proc.diarization || 0}s` : "-";
 
     // Translation processing rows
     const trRows = $("#translation-rows");
@@ -141,7 +141,7 @@ function applyState(data) {
     const summary = $("#translation-summary");
     const counts = data.translations || {};
     if (Object.keys(counts).length === 0) {
-        summary.textContent = "—";
+        summary.textContent = "-";
     } else {
         summary.innerHTML = Object.entries(counts)
             .map(([lang, count]) => `${LANG_FLAGS[lang] || lang} <span style="color:#4a9eff;font-weight:600">${count}</span>`)

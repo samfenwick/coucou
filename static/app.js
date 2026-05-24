@@ -1,4 +1,4 @@
-// Coucou — Web UI
+// Coucou  - Web UI
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -104,7 +104,7 @@ function handleAudioSync(streamTime) {
         const wasNull = state.streamTimeBase == null;
         state.streamTimeBase = streamTime;
         state.audioCtxTimeBase = state.nextPlayTime;
-        // Sync just established — flush any queued subtitles with corrected timing
+        // Sync just established  - flush any queued subtitles with corrected timing
         if (wasNull && subtitleQueue.length > 0) {
             for (const item of subtitleQueue) {
                 item.showAt = item.data.start ? streamTimeToWallClock(item.data.start) : Date.now();
@@ -151,7 +151,7 @@ function playAudioChunk(rawBytes) {
     ensureGainNode();
 
     try {
-        // Raw PCM int16 mono 48kHz — convert to float32 directly (no async decode)
+        // Raw PCM int16 mono 48kHz  - convert to float32 directly (no async decode)
         const int16 = new Int16Array(rawBytes.buffer, rawBytes.byteOffset, rawBytes.byteLength / 2);
         const numSamples = int16.length;
         const audioBuffer = ctx.createBuffer(1, numSamples, 48000);
@@ -168,7 +168,7 @@ function playAudioChunk(rawBytes) {
         if (state.nextPlayTime < now) {
             state.nextPlayTime = now;
         }
-        // Cap scheduling buffer to 150ms — drop audio rather than accumulate latency
+        // Cap scheduling buffer to 150ms  - drop audio rather than accumulate latency
         if (state.nextPlayTime > now + 0.15) {
             state.nextPlayTime = now;
         }
@@ -223,7 +223,7 @@ function showPartialSubtitle(text) {
     // Cancel any in-progress final subtitle animation
     if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
     if (showTimer) { clearTimeout(showTimer); showTimer = null; }
-    // Flush any stale queued subtitles — partial represents current state
+    // Flush any stale queued subtitles  - partial represents current state
     subtitleQueue.length = 0;
     const el = $("#subtitle-text");
     el.style.display = "";
@@ -238,7 +238,7 @@ function showPartialSubtitle(text) {
 
 function enqueueSubtitle(data) {
     if (state.streamTimeBase == null) {
-        // No audio sync (broadcast_audio off or not yet established) —
+        // No audio sync (broadcast_audio off or not yet established)  -
         // show immediately, bypass queue to avoid race with partials
         presentSubtitle(data);
         return;
@@ -247,7 +247,7 @@ function enqueueSubtitle(data) {
     // Sync to audio playback: show subtitle when its audio actually plays
     const showAt = data.start ? streamTimeToWallClock(data.start) : Date.now();
 
-    // Drop stale queued entries (showAt already past) — keep only the most recent one
+    // Drop stale queued entries (showAt already past)  - keep only the most recent one
     const now = Date.now();
     const stale = [];
     subtitleQueue.forEach(q => { if (q.showAt <= now) stale.push(q); });
@@ -269,7 +269,7 @@ function scheduleNext() {
         return;
     }
 
-    // Skip stale entries — only show the most recent past-due one
+    // Skip stale entries  - only show the most recent past-due one
     const now = Date.now();
     while (subtitleQueue.length > 1 && subtitleQueue[0].showAt <= now) {
         subtitleQueue.shift();
@@ -484,7 +484,7 @@ function connect() {
             } else if (data.type === "settings") {
                 applyServerSettings(data);
             } else if (data.type === "sync_reset") {
-                // Settings changed — reset sync state so subtitles recalibrate
+                // Settings changed  - reset sync state so subtitles recalibrate
                 state.streamTimeBase = null;
                 state.audioCtxTimeBase = null;
                 state.nextPlayTime = 0;
@@ -539,7 +539,7 @@ function handleStatus(data) {
         }
         clearSubtitles();
         if (data.broadcast_audio === false) {
-            // No audio to buffer — show "Listening..." immediately
+            // No audio to buffer  - show "Listening..." immediately
             $("#subtitle-text").innerHTML = '<span class="buffer-label">Listening...</span>';
             $("#subtitle-text").classList.add("inactive");
             bs.textContent = "Subtitles Only";
@@ -606,7 +606,7 @@ async function autoRouteToOriginalOutput(deviceName) {
 
     const saved = localStorage.getItem("subcurrent-output-device");
     if (saved && saved !== "default") {
-        // User previously picked a specific device — respect that choice
+        // User previously picked a specific device  - respect that choice
         try {
             await ctx.setSinkId(saved);
             console.log("Routed audio to saved device:", saved);
@@ -621,7 +621,7 @@ async function autoRouteToOriginalOutput(deviceName) {
         return;
     }
 
-    // No saved preference — auto-route to the server's original output device
+    // No saved preference  - auto-route to the server's original output device
     const devices = await navigator.mediaDevices.enumerateDevices();
     const match = devices.find(d =>
         d.kind === "audiooutput" && d.label.includes(deviceName)
@@ -698,7 +698,7 @@ if (savedTranslate !== null) state.translateActive = savedTranslate === "1";
 // Set a default source flag until first detection
 $("#translate-toggle").textContent = "\u{1F30D}";
 
-// Translate toggle — click the flag bar to toggle translations on/off
+// Translate toggle  - click the flag bar to toggle translations on/off
 function updateTranslateBarUI() {
     const bar = $("#translate-bar");
     if (!state.translateEnabled) {

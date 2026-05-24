@@ -5,31 +5,31 @@
 <h1 align="center">Coucou</h1>
 
 <p align="center">
-  Real-time transcription, translation, and speaker diarization — running entirely on-device on Apple Silicon. No cloud, no API keys, no data leaves your Mac.
+  Real-time transcription, translation, and speaker diarization - running entirely on-device on Apple Silicon. No cloud, no API keys, no data leaves your Mac.
 </p>
 
-<p align="center"><strong>🚧 Work in progress — alpha quality, UX improvements coming</strong></p>
+<p align="center"><strong>🚧 Work in progress - alpha quality, UX improvements coming</strong></p>
 
 ---
 
 ## What is it?
 
-Coucou captures your Mac's system audio (or microphone), transcribes it in real-time with word-level timestamps, identifies speakers, translates to 20+ languages, and streams everything to any browser — all processed locally on your Mac's GPU via [MLX](https://github.com/ml-explore/mlx).
+Coucou captures your Mac's system audio (or microphone), transcribes it in real-time with word-level timestamps, identifies speakers, translates to 20+ languages, and streams everything to any browser - all processed locally on your Mac's GPU via [MLX](https://github.com/ml-explore/mlx).
 
 **Two interfaces:**
-- **Viewer** (`localhost:8000`) — passive subtitle display with synced audio playback, word highlighting, and Picture-in-Picture support
-- **Admin** (`localhost:8001`) — pipeline controls, mode switching, tuning, and live stats
+- **Viewer** (`localhost:8000`) - passive subtitle display with synced audio playback, word highlighting, and Picture-in-Picture support
+- **Admin** (`localhost:8001`) - pipeline controls, mode switching, tuning, and live stats
 
 ## Use cases
 
-- **Language learning** — watch French TV, YouTube, or podcasts with synced subtitles and live English translations
-- **Conference calls** — start Coucou, share a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) or [Tailscale](https://tailscale.com/kb/1312/serve) link with participants, and everyone gets live captions with translations in their chosen language
-- **Accessibility** — real-time captions for any audio playing on your Mac
-- **Podcasts & music** — synced transcription of anything coming through your speakers
+- **Language learning** - watch French TV, YouTube, or podcasts with synced subtitles and live English translations
+- **Conference calls** - start Coucou, share a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) or [Tailscale](https://tailscale.com/kb/1312/serve) link with participants, and everyone gets live captions with translations in their chosen language
+- **Accessibility** - real-time captions for any audio playing on your Mac
+- **Podcasts & music** - synced transcription of anything coming through your speakers
 
 ## Requirements
 
-- **macOS** on **Apple Silicon** (M1/M2/M3/M4) — this is Mac-native only
+- **macOS** on **Apple Silicon** (M1/M2/M3/M4) - this is Mac-native only
 - **Python 3.10+** and [uv](https://docs.astral.sh/uv/)
 - **~5.6 GB disk space** for ML models (downloaded once, cached in `~/.cache/huggingface`)
 
@@ -42,8 +42,8 @@ cd coucou
 ```
 
 This installs:
-- [BlackHole 2ch](https://existential.audio/blackhole/) — virtual audio device that captures system audio
-- [SwitchAudioSource](https://github.com/deweller/switchaudio-osx) — programmatic audio routing
+- [BlackHole 2ch](https://existential.audio/blackhole/) - virtual audio device that captures system audio
+- [SwitchAudioSource](https://github.com/deweller/switchaudio-osx) - programmatic audio routing
 - Python dependencies
 - All three ML models (pre-downloaded so first run is fast)
 
@@ -75,7 +75,7 @@ No Hugging Face account or license acceptance is required to download these MLX 
 
 | Mode | Latency | Best for |
 |------|---------|----------|
-| **Synced** | ~15–20s buffer | Watching video/TV — audio replays in sync with subtitles |
+| **Synced** | ~15–20s buffer | Watching video/TV - audio replays in sync with subtitles |
 | **Realtime** | <1s | Live conversations, conference calls |
 
 Switch between modes in the admin panel. Synced mode buffers audio so subtitles are perfectly timed with playback. Realtime mode streams subtitles as fast as possible with minimal delay.

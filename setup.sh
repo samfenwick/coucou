@@ -8,7 +8,7 @@ if ! brew list blackhole-2ch &>/dev/null; then
     echo "Installing BlackHole 2ch..."
     brew install blackhole-2ch
     echo ""
-    echo "⚠️  BlackHole installed — you may need to restart your Mac and allow"
+    echo "⚠️  BlackHole installed  - you may need to restart your Mac and allow"
     echo "   the audio driver in System Settings > Privacy & Security."
     echo ""
 else

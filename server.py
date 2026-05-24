@@ -218,7 +218,7 @@ def _enqueue_subtitle(item):
     if loop:
         loop.call_soon_threadsafe(pipeline["subtitle_queue"].put_nowait, item)
     else:
-        log.warning("Cannot enqueue subtitle — event loop not set!")
+        log.warning("Cannot enqueue subtitle  - event loop not set!")
 
 
 def _tag_words_with_speakers(words, speaker_segments):
@@ -229,7 +229,7 @@ def _tag_words_with_speakers(words, speaker_segments):
     if not speaker_segments:
         return
 
-    # Single speaker — tag all words with that speaker
+    # Single speaker  - tag all words with that speaker
     unique_speakers = set(seg["speaker"] for seg in speaker_segments)
     if len(unique_speakers) <= 1:
         spk = next(iter(unique_speakers))
@@ -355,7 +355,7 @@ def transcription_thread_fn(transcription_buffer, transcriber, config):
             from langdetect import detect
             detect_lang = detect
         except ImportError:
-            log.warning("langdetect not installed — language detection disabled")
+            log.warning("langdetect not installed  - language detection disabled")
 
     try:
         while pipeline["running"]:
@@ -399,7 +399,7 @@ def transcription_thread_fn(transcription_buffer, transcriber, config):
 
             chunk_offset = next_position / 16000.0
 
-            # Skip near-silent chunks — saves ~4s of wasted model processing
+            # Skip near-silent chunks  - saves ~4s of wasted model processing
             rms = (chunk.astype(np.float32) ** 2).mean() ** 0.5
             peak = np.max(np.abs(chunk))
             if rms < 50:
@@ -419,7 +419,7 @@ def transcription_thread_fn(transcription_buffer, transcriber, config):
                 )
                 transcription_time = time.monotonic() - t0
 
-                # Diarize (same thread — MLX models are thread-local)
+                # Diarize (same thread  - MLX models are thread-local)
                 speaker_segments = None
                 diar_time = 0
                 if pipeline.get("diarize_enabled", True) and diarizer:
@@ -515,7 +515,7 @@ def transcription_thread_fn(transcription_buffer, transcriber, config):
                     step_secs = chunk_secs - overlap_secs
                     if avg_processing > step_secs and len(pipeline.get("transcription_times", [])) >= 3:
                         log.warning(
-                            f"Processing ({avg_processing:.1f}s) exceeds step time ({step_secs:.1f}s) — "
+                            f"Processing ({avg_processing:.1f}s) exceeds step time ({step_secs:.1f}s)  - "
                             f"audio will drift. Consider increasing chunk_seconds or disabling translation."
                         )
                     if pipeline["audio_delay"] < required_delay:
@@ -550,11 +550,11 @@ def transcription_thread_fn(transcription_buffer, transcriber, config):
 
 
 def streaming_transcription_thread_fn(transcription_buffer, config):
-    """Streaming transcription for realtime mode — feeds audio continuously."""
+    """Streaming transcription for realtime mode  - feeds audio continuously."""
     log.info("Streaming transcription thread started")
 
     model_name = config.get("LOCAL_MODEL", "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit")
-    # Use lower delay for streaming — trades accuracy for speed
+    # Use lower delay for streaming  - trades accuracy for speed
     delay_ms = int(config.get("STREAMING_DELAY_MS", "320"))
     streamer = StreamingTranscriber(model_name=model_name, delay_ms=delay_ms)
     log.info(f"Streaming transcriber ready: delay={delay_ms}ms")
@@ -566,7 +566,7 @@ def streaming_transcription_thread_fn(transcription_buffer, config):
             from langdetect import detect
             detect_lang = detect
         except ImportError:
-            log.warning("langdetect not installed — language detection disabled")
+            log.warning("langdetect not installed  - language detection disabled")
 
     # Read position in the transcription buffer (16kHz)
     read_pos = transcription_buffer.write_position
@@ -587,7 +587,7 @@ def streaming_transcription_thread_fn(transcription_buffer, config):
                 while available >= feed_size and pipeline["running"]:
                     chunk = transcription_buffer.read_at(read_pos, feed_size)
                     if chunk is not None:
-                        # Always feed in streaming mode — model handles silence
+                        # Always feed in streaming mode  - model handles silence
                         # with PAD tokens, which we use for sentence boundary detection
                         streamer.feed(chunk)
                         fed_this_round += feed_size
@@ -602,7 +602,7 @@ def streaming_transcription_thread_fn(transcription_buffer, config):
             # Poll for results
             results = streamer.poll()
             if results and not first_result_logged:
-                log.info(f"Streaming: first result after {total_fed/16000:.1f}s of audio — {results[0]}")
+                log.info(f"Streaming: first result after {total_fed/16000:.1f}s of audio  - {results[0]}")
                 first_result_logged = True
             for r in results:
                 if r["type"] == "partial":
@@ -815,9 +815,9 @@ async def broadcast_audio():
         if pipeline.get("_generation", 0) != current_gen:
             continue
 
-        # Buffer filled — transition to capturing
+        # Buffer filled  - transition to capturing
         pipeline["status"] = "capturing"
-        log.info(f"Audio buffer filled ({pipeline['audio_delay']:.1f}s) — now broadcasting")
+        log.info(f"Audio buffer filled ({pipeline['audio_delay']:.1f}s)  - now broadcasting")
         try:
             await broadcast_status_to_viewers()
             await push_state_to_admins()
@@ -845,7 +845,7 @@ async def broadcast_audio():
             elif read_position < target_position - 48000:
                 read_position = target_position
 
-            # Don't read ahead of target — prevents audio drift vs subtitles
+            # Don't read ahead of target  - prevents audio drift vs subtitles
             if read_position >= target_position:
                 await asyncio.sleep(0.01)
                 continue
@@ -865,7 +865,7 @@ async def broadcast_audio():
             read_position += chunk_size
 
             try:
-                # Send raw PCM bytes (int16, mono, 48kHz) — client decodes synchronously
+                # Send raw PCM bytes (int16, mono, 48kHz)  - client decodes synchronously
                 raw_pcm = chunk.tobytes()
                 if not pipeline.get("_audio_logged"):
                     log.info(f"First audio chunk sent to {len(active_clients)} clients (stream_time={stream_time:.1f}s)")
@@ -903,7 +903,7 @@ async def broadcast_subtitles():
             if not active_clients:
                 continue
 
-            # Partial subtitles — broadcast raw text immediately, no per-client translation
+            # Partial subtitles  - broadcast raw text immediately, no per-client translation
             if subtitle.get("type") == "partial":
                 msg = json.dumps(subtitle)
                 await asyncio.gather(
@@ -960,7 +960,7 @@ async def push_admin_stats():
 
 
 async def handle_websocket(websocket):
-    """Handle a viewer WebSocket connection (passive — no start/stop control)."""
+    """Handle a viewer WebSocket connection (passive  - no start/stop control)."""
     connected_clients.add(websocket)
     client_state[websocket] = {"target_language": pipeline.get("default_target_language", "en")}
     log.info(f"Client connected ({len(connected_clients)} total)")
