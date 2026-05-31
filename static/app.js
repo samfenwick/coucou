@@ -160,18 +160,29 @@ function playAudioChunk(rawBytes) {
             channel[i] = int16[i] / 32768;
         }
 
+        const now = ctx.currentTime;
+        // Pre-roll jitter buffer: keep playback a fixed lead ahead of the clock so
+        // late-arriving chunks (mobile network/CPU jitter) don't underrun and click.
+        const PREROLL = 0.18;
+        const MAX_LEAD = 0.6;
+        // Underrun (fell behind or first chunk) or drifted too far ahead: restart
+        // the schedule with a cushion instead of snapping hard to `now`.
+        let restarted = false;
+        if (state.nextPlayTime < now || state.nextPlayTime > now + MAX_LEAD) {
+            state.nextPlayTime = now + PREROLL;
+            restarted = true;
+        }
+        // Smooth the discontinuity at a restart with a short fade-in (~5ms) so the
+        // gap reads as a soft edge rather than a crackle.
+        if (restarted) {
+            const fadeSamples = Math.min(240, numSamples);
+            for (let i = 0; i < fadeSamples; i++) channel[i] *= i / fadeSamples;
+        }
+
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(state.gainNode);
 
-        const now = ctx.currentTime;
-        if (state.nextPlayTime < now) {
-            state.nextPlayTime = now;
-        }
-        // Cap scheduling buffer to 150ms  - drop audio rather than accumulate latency
-        if (state.nextPlayTime > now + 0.15) {
-            state.nextPlayTime = now;
-        }
         source.start(state.nextPlayTime);
         state.nextPlayTime += audioBuffer.duration;
 
@@ -238,8 +249,13 @@ function showPartialSubtitle(text) {
 
 function enqueueSubtitle(data) {
     if (state.streamTimeBase == null) {
-        // No audio sync (broadcast_audio off or not yet established)  -
-        // show immediately, bypass queue to avoid race with partials
+        if (state.audioBroadcast && data.start != null) {
+            // Sync not established yet (just connected mid-stream). Defer until
+            // the first audio_sync, which recomputes showAt for queued items.
+            subtitleQueue.push({ data, showAt: Infinity });
+            return;
+        }
+        // No audio sync (subtitles-only mode)  - show immediately
         presentSubtitle(data);
         return;
     }
@@ -386,10 +402,12 @@ function presentSubtitle(data) {
     syncPipSubtitles(false, null, activeTranslation);
 
     const wordEls = el.querySelectorAll(".word");
-    const pipWordEls = pipWindow ? pipWindow.document.querySelectorAll("#pip-content .word") : [];
+    // PiP word refs are resolved lazily inside step() so a PiP window opened
+    // mid-line picks up live highlighting instead of stalling until the next subtitle.
+    let pipWordEls = pipWindow ? pipWindow.document.querySelectorAll("#pip-content .word") : [];
     // Translation word elements for proportional highlighting
     const trWordEls = state.translationHighlight ? $("#translation-text").querySelectorAll(".tr-word") : [];
-    const pipTrWordEls = state.translationHighlight && pipWindow ? pipWindow.document.querySelectorAll("#pip-translation .tr-word") : [];
+    let pipTrWordEls = state.translationHighlight && pipWindow ? pipWindow.document.querySelectorAll("#pip-translation .tr-word") : [];
     const firstStart = data.words[0].start;
     const lastEnd = data.words[data.words.length - 1].end;
     const totalMs = (lastEnd - firstStart) * 1000;
@@ -400,6 +418,15 @@ function presentSubtitle(data) {
     function step(ts) {
         if (!startTs) startTs = ts;
         const elapsed = ts - startTs;
+
+        // PiP may have opened after this animation started; bind to its word
+        // elements once they exist so highlighting continues without a stall.
+        if (pipWindow && pipWordEls.length === 0 && wordEls.length > 0) {
+            pipWordEls = pipWindow.document.querySelectorAll("#pip-content .word");
+            if (state.translationHighlight) {
+                pipTrWordEls = pipWindow.document.querySelectorAll("#pip-translation .tr-word");
+            }
+        }
 
         for (let i = prevIdx + 1; i < data.words.length; i++) {
             const wordStart = (data.words[i].start - firstStart) * 1000;
@@ -474,6 +501,7 @@ function connect() {
         } else {
             const data = JSON.parse(event.data);
             if (data.type === "subtitle") {
+                state.lastSubtitle = data;
                 enqueueSubtitle(data);
             } else if (data.type === "partial") {
                 showPartialSubtitle(data.text);
@@ -513,6 +541,7 @@ function handleStatus(data) {
     const bs = $("#broadcast-status");
     if (data.status === "capturing") {
         state.capturing = true;
+        state.audioBroadcast = data.broadcast_audio !== false;
         if (!state.audioCtx) {
             state.audioCtx = new AudioContext({ sampleRate: 48000 });
         }
@@ -529,6 +558,7 @@ function handleStatus(data) {
         }
     } else if (data.status === "buffering") {
         state.capturing = !data.broadcast_audio; // subtitles-only mode is immediately ready
+        state.audioBroadcast = data.broadcast_audio !== false;
         // Reset sync state for clean restart
         state.nextPlayTime = 0;
         state.streamTimeBase = null;
@@ -558,6 +588,7 @@ function handleStatus(data) {
         }
     } else if (data.status === "stopped") {
         state.capturing = false;
+        state.audioBroadcast = false;
         $("#subtitle-text").textContent = "Waiting for audio...";
         $("#subtitle-text").classList.add("inactive");
         bs.textContent = "Not Broadcasting";
@@ -1012,15 +1043,27 @@ if ("documentPictureInPicture" in window) {
     });
 }
 
-// When returning to tab, drop stale subtitles so we don't lag behind
+// When returning to tab, jump straight to the current subtitle. Background tabs
+// freeze requestAnimationFrame, so an in-flight karaoke animation leaves
+// animationId stuck non-null and the render queue stalls until the next message.
 document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && subtitleQueue.length > 0) {
-        // Keep only the most recent subtitle, drop the rest
-        const latest = subtitleQueue[subtitleQueue.length - 1];
-        subtitleQueue.length = 0;
-        subtitleQueue.push(latest);
-        if (!animationId && !showTimer) scheduleNext();
+    if (document.hidden) return;
+
+    // Resume audio if the browser suspended the context while backgrounded.
+    if (state.audioCtx && state.audioCtx.state === "suspended") {
+        state.audioCtx.resume().catch(() => {});
     }
+
+    // Tear down any frozen animation/timer so the render loop can restart.
+    if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
+    if (showTimer) { clearTimeout(showTimer); showTimer = null; }
+
+    // Drop the backlog and show the most recent subtitle immediately.
+    const latest = subtitleQueue.length > 0
+        ? subtitleQueue[subtitleQueue.length - 1].data
+        : state.lastSubtitle;
+    subtitleQueue.length = 0;
+    if (latest) presentSubtitle(latest);
 });
 
 // --- Mute toggle ---

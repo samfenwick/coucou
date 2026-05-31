@@ -160,14 +160,21 @@ SETTINGS_DEFAULTS = {
 
 
 def load_settings():
-    """Load persisted settings, falling back to defaults."""
+    """Load persisted settings, falling back to defaults.
+
+    Returns (merged_settings, keys_from_disk) so callers can tell which values
+    the user has explicitly persisted versus which are just defaults  - this lets
+    saved toggles take precedence over .env defaults on startup.
+    """
     settings = dict(SETTINGS_DEFAULTS)
+    on_disk = {}
     try:
         with open(SETTINGS_FILE) as f:
-            settings.update(json.load(f))
+            on_disk = json.load(f)
+            settings.update(on_disk)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
-    return settings
+    return settings, on_disk
 
 
 def save_settings():
@@ -180,7 +187,7 @@ def save_settings():
         log.warning(f"Failed to save settings: {e}")
 
 
-saved = load_settings()
+saved, saved_on_disk = load_settings()
 
 # --- Pipeline state ---
 pipeline = {
@@ -214,6 +221,13 @@ pipeline = {
 
 def _enqueue_subtitle(item):
     """Thread-safe enqueue: schedule put_nowait on the event loop."""
+    # Keep a short rolling history of final subtitles so clients connecting
+    # mid-stream can be sent the lines matching the buffered audio they hear.
+    if item.get("type") == "subtitle":
+        history = pipeline.setdefault("subtitle_history", [])
+        history.append(item)
+        cutoff = item.get("end", 0) - 60
+        pipeline["subtitle_history"] = [h for h in history if h.get("end", 0) >= cutoff][-40:]
     loop = pipeline.get("loop")
     if loop:
         loop.call_soon_threadsafe(pipeline["subtitle_queue"].put_nowait, item)
@@ -684,6 +698,7 @@ def _start_pipeline_common(config):
     pipeline["playback_buffer"] = playback_buffer
     pipeline["transcription_buffer"] = transcription_buffer
 
+    pipeline["subtitle_history"] = []
     capture = AudioCapture(playback_buffer, transcription_buffer)
     pipeline["audio_capture"] = capture
     pipeline["transcriber"] = _create_transcriber(config)
@@ -707,6 +722,8 @@ def _finish_pipeline_start(config, transcription_buffer):
             target=transcription_thread_fn, args=(transcription_buffer, pipeline["transcriber"], config), daemon=True
         )
     pipeline["transcription_thread"].start()
+    # Promote already-connected viewers so they receive audio/subtitles
+    active_clients.update(connected_clients)
     log.info("Pipeline started")
 
 
@@ -982,6 +999,17 @@ async def handle_websocket(websocket):
     if pipeline["running"]:
         active_clients.add(websocket)
         log.debug(f"Added client to active_clients ({len(active_clients)} active)")
+        # Replay recent subtitles so the client shows the lines matching the
+        # buffered audio it's about to hear (client syncs them by stream time).
+        tl = client_state[websocket]["target_language"]
+        for item in pipeline.get("subtitle_history", []):
+            translations = item.get("translations", {})
+            await websocket.send(json.dumps({
+                **item,
+                "translation": translations.get(tl),
+                "target_language": tl,
+                "translations": None,
+            }))
 
     try:
         async for message in websocket:
@@ -1168,9 +1196,12 @@ async def main():
     admin_port = int(config.get("ADMIN_PORT", "8001"))
     pipeline["loop"] = asyncio.get_running_loop()
 
-    # Init pipeline flags from config
-    pipeline["translate_enabled"] = config.get("TRANSLATE", "true").lower() in ("1", "true", "yes")
-    pipeline["diarize_enabled"] = config.get("DIARIZE", "true").lower() in ("1", "true", "yes")
+    # Seed pipeline flags from .env, but only when the user hasn't already
+    # persisted a choice  - saved toggles must survive a restart.
+    if "translate_enabled" not in saved_on_disk:
+        pipeline["translate_enabled"] = config.get("TRANSLATE", "true").lower() in ("1", "true", "yes")
+    if "diarize_enabled" not in saved_on_disk:
+        pipeline["diarize_enabled"] = config.get("DIARIZE", "true").lower() in ("1", "true", "yes")
     pipeline["default_target_language"] = config.get("TARGET_LANGUAGE", "en")
 
     # Preload models on startup so first transcription is fast

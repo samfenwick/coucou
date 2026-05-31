@@ -169,14 +169,9 @@ body {
     user-select: text;
 }
 
-/* Translation floats below original without affecting its position */
+/* Translation sits in normal flow below the original so the container centres
+   the pair as a unit: the midpoint between the two lines lands at page centre. */
 .translating #translation-text {
-    position: absolute;
-    top: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    width: max-content;
-    max-width: 90vw;
     margin-top: 0.5rem;
 }
 
@@ -664,7 +659,25 @@ input[type="range"] {
 
 @media (max-width: 600px) and (orientation: portrait) {
     #subtitle-area {
-        padding: 1.5rem 1rem;
+        align-items: flex-start;
+        padding: 18vh 1rem 1.5rem;
+    }
+
+    /* Use full width so only the 16px area padding insets the text from the edge,
+       instead of the 90% container cap adding another ~5% each side. */
+    #subtitle-container {
+        max-width: 100%;
+    }
+
+    /* Keep translation in normal flow so the pair grows down from the top
+       anchor instead of floating near the bottom of the screen. */
+    .translating #translation-text {
+        position: static;
+        transform: none;
+        left: auto;
+        width: auto;
+        max-width: 100%;
+        margin-top: 0.4rem;
     }
 
     #subtitle-text:not(.inactive) {
