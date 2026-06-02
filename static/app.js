@@ -2,6 +2,10 @@
 
 const $ = (sel) => document.querySelector(sel);
 
+// Declared early: apply*() helpers run during init and reference this before
+// the Picture-in-Picture section executes.
+let pipWindow = null;
+
 const LANG_FLAGS = {
     af: "\u{1F1FF}\u{1F1E6}", ar: "\u{1F1E6}\u{1F1EA}", bg: "\u{1F1E7}\u{1F1EC}", bn: "\u{1F1E7}\u{1F1E9}",
     ca: "\u{1F1EA}\u{1F1F8}", cs: "\u{1F1E8}\u{1F1FF}", da: "\u{1F1E9}\u{1F1F0}", de: "\u{1F1E9}\u{1F1EA}",
@@ -683,11 +687,40 @@ function applyFontSize(size) {
     document.documentElement.style.setProperty("--subtitle-size", `${size}px`);
     $("#font-size").value = size;
     $("#font-size-label").textContent = `${size}px`;
+    fitPipText();
 }
 
 $("#font-size").addEventListener("input", (e) => {
     applyFontSize(e.target.value);
     localStorage.setItem("subcurrent-font-size", e.target.value);
+});
+
+function applyTranslationSize(size) {
+    document.documentElement.style.setProperty("--translation-size", `${size}px`);
+    $("#translation-font-size").value = size;
+    $("#translation-font-size-label").textContent = `${size}px`;
+    fitPipText();
+}
+
+$("#translation-font-size").addEventListener("input", (e) => {
+    applyTranslationSize(e.target.value);
+    localStorage.setItem("subcurrent-translation-size", e.target.value);
+});
+
+// Colour theme (per-client, saved locally)
+function applyTheme(name) {
+    document.documentElement.dataset.theme = name;
+    document.querySelectorAll(".theme-swatch").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.theme === name)
+    );
+    syncPipTheme();
+}
+
+$("#theme-swatches").addEventListener("click", (e) => {
+    const btn = e.target.closest(".theme-swatch");
+    if (!btn) return;
+    applyTheme(btn.dataset.theme);
+    localStorage.setItem("subcurrent-theme", btn.dataset.theme);
 });
 
 // Show original toggle
@@ -722,6 +755,9 @@ function applyVolume(vol) {
 // Restore saved client settings
 const savedFontSize = localStorage.getItem("subcurrent-font-size");
 if (savedFontSize) applyFontSize(savedFontSize);
+const savedTranslationSize = localStorage.getItem("subcurrent-translation-size");
+if (savedTranslationSize) applyTranslationSize(savedTranslationSize);
+applyTheme(localStorage.getItem("subcurrent-theme") || "amber-ice");
 const savedVolume = localStorage.getItem("subcurrent-volume");
 if (savedVolume) applyVolume(savedVolume);
 const savedTranslate = localStorage.getItem("coucou-translate-active");
@@ -798,8 +834,6 @@ async function requestWakeLock() {
 
 // --- Picture-in-Picture ---
 
-let pipWindow = null;
-
 async function openPiP() {
     if (!("documentPictureInPicture" in window)) {
         console.warn("Document PiP not supported");
@@ -820,7 +854,7 @@ async function openPiP() {
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #0a0a0a; color: #e8e8e8;
+            background: #0a0a0a; color: var(--original-color, #e8e8e8);
             display: flex; flex-direction: column;
             height: 100vh; overflow: hidden;
             -webkit-user-select: none; user-select: none;
@@ -835,19 +869,19 @@ async function openPiP() {
             text-align: center; line-height: 1.5; width: 100%;
         }
         #pip-content.inactive { color: #666; font-size: 13px; font-style: italic; }
-        /* When translating: both lines equal size, color differentiated */
+        /* Lines differentiated by the selected theme's colour pair */
         #pip-subs.translating #pip-content {
-            color: #e8e8e8;
+            color: var(--original-color, #e8e8e8);
         }
         #pip-translation {
             line-height: 1.3; margin-top: 0.3rem;
-            text-align: center; width: 100%; color: #aabbcc;
+            text-align: center; width: 100%; color: var(--translation-color, #aabbcc);
         }
         #pip-translation:empty { display: none; }
         .tr-word { display: inline; transition: color 0.15s ease, text-shadow 0.15s ease; }
-        .tr-word.active { color: #ffaa44; text-shadow: 0 0 12px rgba(255,170,68,0.3); }
+        .tr-word.active { color: var(--translation-active, #ffaa44); text-shadow: 0 0 12px var(--translation-active, #ffaa44); }
         .word { display: inline; transition: color 0.15s ease, text-shadow 0.15s ease; }
-        .word.active { color: #4a9eff; text-shadow: 0 0 12px rgba(74,158,255,0.3); }
+        .word.active { color: var(--original-active, #4a9eff); text-shadow: 0 0 12px var(--original-active, #4a9eff); }
         .speaker-row { border-left: 2px solid #666; padding-left: 0.5rem; margin-bottom: 0.3rem; text-align: left; }
         .speaker-row:last-child { margin-bottom: 0; }
         .speaker-0 { border-left-color: #4a9eff; }
@@ -908,6 +942,7 @@ async function openPiP() {
     `;
 
     const pipDoc = pipWindow.document;
+    syncPipTheme();
 
     // Volume control
     pipDoc.getElementById("pip-vol").addEventListener("input", (e) => {
@@ -998,6 +1033,25 @@ function syncPipSubtitles(inactive, text, translation) {
     }
 }
 
+// Copy the active theme's colour vars into the PiP document (CSS custom
+// properties don't cascade across separate documents).
+function syncPipTheme() {
+    if (!pipWindow) return;
+    const cs = getComputedStyle(document.documentElement);
+    const root = pipWindow.document.documentElement;
+    ["--original-color", "--original-active", "--translation-color", "--translation-active"].forEach(v => {
+        root.style.setProperty(v, cs.getPropertyValue(v).trim());
+    });
+}
+
+// Ratio of translation size to original size, so PiP honours the slider pair.
+function trSizeRatio() {
+    const cs = getComputedStyle(document.documentElement);
+    const o = parseFloat(cs.getPropertyValue("--subtitle-size")) || 32;
+    const t = parseFloat(cs.getPropertyValue("--translation-size")) || 26;
+    return t / o;
+}
+
 function fitPipText() {
     if (!pipWindow) return;
     const container = pipWindow.document.getElementById("pip-subs");
@@ -1010,12 +1064,13 @@ function fitPipText() {
     if (maxW <= 0 || maxH <= 0) return;
 
     const hasTr = trEl && trEl.textContent;
+    const ratio = trSizeRatio();
 
     let lo = 12, hi = 160;
     while (hi - lo > 1) {
         const mid = Math.floor((lo + hi) / 2);
         content.style.fontSize = mid + "px";
-        if (hasTr) trEl.style.fontSize = mid + "px";
+        if (hasTr) trEl.style.fontSize = Math.round(mid * ratio) + "px";
         const contentH = content.scrollHeight + (hasTr ? trEl.scrollHeight + 8 : 0);
         const contentW = Math.max(content.scrollWidth, hasTr ? trEl.scrollWidth : 0);
         if (contentW > maxW || contentH > maxH) {
@@ -1025,7 +1080,7 @@ function fitPipText() {
         }
     }
     content.style.fontSize = lo + "px";
-    if (hasTr) trEl.style.fontSize = lo + "px";
+    if (hasTr) trEl.style.fontSize = Math.round(lo * ratio) + "px";
 }
 
 if ("documentPictureInPicture" in window) {
