@@ -103,23 +103,38 @@ async function routeToSelectedOutput() {
 
 // --- Audio playback ---
 
-function handleAudioSync(streamTime) {
-    // Record mapping: this stream_time corresponds to the next audio play time
-    if (state.audioCtx && state.nextPlayTime > 0) {
-        const wasNull = state.streamTimeBase == null;
-        state.streamTimeBase = streamTime;
-        state.audioCtxTimeBase = state.nextPlayTime;
-        // Sync just established  - flush any queued subtitles with corrected timing
-        if (wasNull && subtitleQueue.length > 0) {
-            for (const item of subtitleQueue) {
-                item.showAt = item.data.start ? streamTimeToWallClock(item.data.start) : Date.now();
-            }
-            // Drop subtitles whose audio has already played
-            while (subtitleQueue.length > 0 && subtitleQueue[0].showAt < Date.now() - 2000) {
-                subtitleQueue.shift();
-            }
-            if (!animationId && !showTimer) scheduleNext();
+// Each binary frame is a float64 LE stream time followed by int16 mono 48kHz PCM.
+const AUDIO_HEADER_BYTES = 8;
+// Lead kept between the audio clock and the next scheduled chunk, so late
+// chunks (network or CPU jitter) don't underrun.
+const PREROLL = 0.18;
+// Audio arriving faster than it plays is a backlog (a tab coming back from the
+// background, or a stalled connection draining). Beyond this lead it is dropped
+// rather than queued, so playback stays at the live edge.
+const MAX_LEAD = 1.0;
+// Fade-in after a cold start or resync, long enough to avoid a click.
+const FADE_IN = 0.25;
+
+const liveSources = new Set();
+
+function markSynced(streamTime, ctxTime) {
+    const wasNull = state.streamTimeBase == null;
+    state.streamTimeBase = streamTime;
+    state.audioCtxTimeBase = ctxTime;
+    // Sync just established: place any queued subtitles against the audio
+    if (wasNull && subtitleQueue.length > 0) {
+        for (const item of subtitleQueue) {
+            item.showAt = item.data.start ? streamTimeToWallClock(item.data.start) : Date.now();
         }
+        // Lines whose audio has already played become history, not a replay
+        while (subtitleQueue.length > 0 && subtitleQueue[0].data.replay) {
+            const { data } = subtitleQueue[0];
+            if (streamTimeToWallClock(data.end ?? data.start ?? 0) > Date.now()) break;
+            subtitleQueue.shift();
+            if (ilEnabled()) ilAddHistory(data);
+        }
+        subtitleQueue.sort((a, b) => a.showAt - b.showAt);
+        if (!animationId && !showTimer) scheduleNext();
     }
 }
 
@@ -134,52 +149,74 @@ function streamTimeToWallClock(streamTime) {
 function ensureGainNode() {
     if (!state.audioCtx || state.gainNode) return;
     state.gainNode = state.audioCtx.createGain();
-    state.gainNode.gain.value = state.volume;
+    state.gainNode.gain.value = 0;
     state.gainNode.connect(state.audioCtx.destination);
+}
+
+// Short ramps instead of jumps, so volume changes and mute don't click.
+function rampGain(target, seconds) {
+    const g = state.gainNode;
+    if (!g) return;
+    const now = state.audioCtx.currentTime;
+    g.gain.cancelScheduledValues(now);
+    g.gain.setValueAtTime(g.gain.value, now);
+    g.gain.linearRampToValueAtTime(target, now + seconds);
 }
 
 function setVolume(vol) {
     state.volume = vol;
-    if (state.gainNode) {
-        state.gainNode.gain.value = vol;
-    }
+    rampGain(vol, 0.03);
 }
 
-function playAudioChunk(rawBytes) {
-    const ctx = state.audioCtx;
-    if (!ctx || ctx.state === "closed") return;
+// Drop everything scheduled and forget the audio-to-stream mapping. The next
+// chunk starts fresh at the live edge with a fade-in.
+function resetAudio() {
+    for (const src of liveSources) {
+        try { src.stop(); } catch (e) {}
+    }
+    liveSources.clear();
+    if (state.gainNode) {
+        const now = state.audioCtx.currentTime;
+        state.gainNode.gain.cancelScheduledValues(now);
+        state.gainNode.gain.setValueAtTime(0, now);
+    }
+    state.nextPlayTime = 0;
+    state.streamTimeBase = null;
+    state.audioCtxTimeBase = null;
+}
 
-    if (ctx.state === "suspended") {
-        ctx.resume();
+function playAudioChunk(frame) {
+    const ctx = state.audioCtx;
+    if (!ctx || ctx.state === "closed" || frame.byteLength <= AUDIO_HEADER_BYTES) return;
+
+    // A suspended or interrupted clock doesn't advance. Chunks scheduled against
+    // it would pile up and all play at once when it restarts.
+    if (ctx.state !== "running") {
+        ctx.resume().catch(() => {});
+        return;
     }
 
     ensureGainNode();
 
     try {
-        // Raw PCM int16 mono 48kHz  - convert to float32 directly (no async decode)
-        const int16 = new Int16Array(rawBytes.buffer, rawBytes.byteOffset, rawBytes.byteLength / 2);
+        const streamTime = new DataView(frame, 0, AUDIO_HEADER_BYTES).getFloat64(0, true);
+        const int16 = new Int16Array(frame, AUDIO_HEADER_BYTES);
         const numSamples = int16.length;
+        const now = ctx.currentTime;
+
+        if (state.nextPlayTime > now + MAX_LEAD) return;
+
+        const coldStart = state.nextPlayTime === 0;
+        const underrun = !coldStart && state.nextPlayTime < now;
+        if (coldStart || underrun) state.nextPlayTime = now + PREROLL;
+
         const audioBuffer = ctx.createBuffer(1, numSamples, 48000);
         const channel = audioBuffer.getChannelData(0);
         for (let i = 0; i < numSamples; i++) {
             channel[i] = int16[i] / 32768;
         }
-
-        const now = ctx.currentTime;
-        // Pre-roll jitter buffer: keep playback a fixed lead ahead of the clock so
-        // late-arriving chunks (mobile network/CPU jitter) don't underrun and click.
-        const PREROLL = 0.18;
-        const MAX_LEAD = 0.6;
-        // Underrun (fell behind or first chunk) or drifted too far ahead: restart
-        // the schedule with a cushion instead of snapping hard to `now`.
-        let restarted = false;
-        if (state.nextPlayTime < now || state.nextPlayTime > now + MAX_LEAD) {
-            state.nextPlayTime = now + PREROLL;
-            restarted = true;
-        }
-        // Smooth the discontinuity at a restart with a short fade-in (~5ms) so the
-        // gap reads as a soft edge rather than a crackle.
-        if (restarted) {
+        // Soften the edge after an underrun gap (~5ms) so it doesn't crackle.
+        if (underrun) {
             const fadeSamples = Math.min(240, numSamples);
             for (let i = 0; i < fadeSamples; i++) channel[i] *= i / fadeSamples;
         }
@@ -187,14 +224,18 @@ function playAudioChunk(rawBytes) {
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(state.gainNode);
-
+        source.onended = () => liveSources.delete(source);
+        liveSources.add(source);
         source.start(state.nextPlayTime);
-        state.nextPlayTime += audioBuffer.duration;
 
-        if (!state._audioLogDone) {
-            console.log(`Audio playing: ctx.state=${ctx.state}, sinkId=${ctx.sinkId}, vol=${state.volume}, dur=${audioBuffer.duration.toFixed(3)}s, samples=${numSamples}`);
-            state._audioLogDone = true;
+        if (coldStart) {
+            const g = state.gainNode.gain;
+            g.cancelScheduledValues(now);
+            g.setValueAtTime(0, state.nextPlayTime);
+            g.linearRampToValueAtTime(state.volume, state.nextPlayTime + FADE_IN);
         }
+        markSynced(streamTime, state.nextPlayTime);
+        state.nextPlayTime += audioBuffer.duration;
     } catch (err) {
         console.warn("Audio playback error:", err);
     }
@@ -264,7 +305,7 @@ function enqueueSubtitle(data) {
     if (state.streamTimeBase == null) {
         if (state.audioBroadcast && data.start != null) {
             // Sync not established yet (just connected mid-stream). Defer until
-            // the first audio_sync, which recomputes showAt for queued items.
+            // the first audio chunk, which recomputes showAt for queued items.
             subtitleQueue.push({ data, showAt: Infinity });
             return;
         }
@@ -274,18 +315,17 @@ function enqueueSubtitle(data) {
     }
 
     // Sync to audio playback: show subtitle when its audio actually plays
-    const showAt = data.start ? streamTimeToWallClock(data.start) : Date.now();
-
-    // Drop stale queued entries (showAt already past)  - keep only the most recent one
     const now = Date.now();
-    const stale = [];
-    subtitleQueue.forEach(q => { if (q.showAt <= now) stale.push(q); });
-    if (stale.length > 0) {
-        // Remove all stale except keep the newest one to show immediately
-        subtitleQueue.length = 0;
+    if (data.replay && streamTimeToWallClock(data.end ?? data.start ?? 0) < now) {
+        // Sent on connect, and its audio played before this tab joined
+        if (ilEnabled()) ilAddHistory(data);
+        return;
     }
-
+    const showAt = data.start ? streamTimeToWallClock(data.start) : now;
+    // scheduleNext skips past-due entries except the newest, so a backlog
+    // catches up to the audio instead of replaying.
     subtitleQueue.push({ data, showAt });
+    subtitleQueue.sort((a, b) => a.showAt - b.showAt);
 
     // Kick off processing if idle
     if (!animationId && !showTimer) scheduleNext();
@@ -300,7 +340,7 @@ function scheduleNext() {
 
     // Skip stale entries  - only show the most recent past-due one
     const now = Date.now();
-    while (subtitleQueue.length > 1 && subtitleQueue[0].showAt <= now) {
+    while (subtitleQueue.length > 1 && subtitleQueue[1].showAt <= now) {
         subtitleQueue.shift();
     }
 
@@ -453,6 +493,27 @@ function ilShow(built, partial) {
     ilFitCurrent();
 }
 
+// Add an utterance straight to history, for lines that played before this tab
+// connected.
+function ilAddHistory(data) {
+    const frWords = data.words && data.words.length
+        ? data.words.map((w) => String(w.word).trim())
+        : (data.text || "").trim().split(/\s+/).filter(Boolean);
+    if (!frWords.length) return;
+    const built = ilBuildUnit(frWords, [], state.translateActive ? data.translation : "");
+    const history = $("#il-history");
+    if (il.current) {
+        // Keep history in order: anything already on screen is older.
+        history.appendChild(il.current);
+        il.current = null;
+        il.partial = false;
+        $("#il-current").replaceChildren();
+    }
+    history.appendChild(built.unit);
+    while (history.children.length > IL_HISTORY) history.firstElementChild.remove();
+    $("#app").classList.add("il-has-content");
+}
+
 function ilShowPartial(text) {
     const words = text.trim().split(/\s+/).filter(Boolean);
     if (!words.length) return;
@@ -530,6 +591,7 @@ function ilPresent(data, translation) {
 }
 
 function presentSubtitle(data) {
+    state.shownSubtitle = data;
     // Cancel any in-progress animation (e.g. provisional being replaced by final)
     if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
     if (showTimer) { clearTimeout(showTimer); showTimer = null; }
@@ -586,11 +648,12 @@ function presentSubtitle(data) {
     const totalMs = (lastEnd - firstStart) * 1000;
     let prevIdx = -1;
     let prevTrIdx = -1;
-    let startTs = null;
+    // Time highlighting from the audio clock when synced, so a line shown late
+    // (after catching up) highlights the word actually being heard.
+    const startWall = state.streamTimeBase != null ? streamTimeToWallClock(firstStart) : Date.now();
 
-    function step(ts) {
-        if (!startTs) startTs = ts;
-        const elapsed = ts - startTs;
+    function step() {
+        const elapsed = Date.now() - startWall;
 
         // PiP may have opened after this animation started; bind to its word
         // elements once they exist so highlighting continues without a stall.
@@ -667,58 +730,96 @@ function presentSubtitle(data) {
 
 // --- WebSocket ---
 
+// A gap this long between messages while audio is streaming means the page was
+// frozen (iOS does this to background tabs) and the socket has a backlog behind it.
+const FREEZE_GAP_MS = 2000;
+let lastMessageAt = 0;
+let lastResyncAt = 0;
+
 function connect() {
+    if (state.reconnectTimer) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; }
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${location.host}`;
+    const ws = new WebSocket(`${protocol}//${location.host}`);
+    ws.binaryType = "arraybuffer";
+    state.ws = ws;
+    lastMessageAt = 0;
 
-    state.ws = new WebSocket(wsUrl);
-    state.ws.binaryType = "arraybuffer";
-
-    state.ws.addEventListener("open", () => {
+    ws.addEventListener("open", () => {
+        if (ws !== state.ws) return;
         $("#connection-status").textContent = "Connected";
         $("#connection-status").classList.add("connected");
         state.reconnectDelay = 1000;
     });
 
-    state.ws.addEventListener("message", (event) => {
+    ws.addEventListener("message", (event) => {
+        // Messages still queued on a socket we replaced are stale
+        if (ws !== state.ws) return;
+        const now = performance.now();
+        const gap = lastMessageAt ? now - lastMessageAt : 0;
+        lastMessageAt = now;
+        if (gap > FREEZE_GAP_MS && state.capturing && state.audioBroadcast) {
+            resync();
+            return;
+        }
+
         if (event.data instanceof ArrayBuffer) {
-            playAudioChunk(new Uint8Array(event.data));
-        } else {
-            const data = JSON.parse(event.data);
-            if (data.type === "subtitle") {
-                state.lastSubtitle = data;
-                enqueueSubtitle(data);
-            } else if (data.type === "partial") {
-                showPartialSubtitle(data.text);
-            } else if (data.type === "audio_sync") {
-                handleAudioSync(data.stream_time);
-            } else if (data.type === "status") {
-                handleStatus(data);
-            } else if (data.type === "settings") {
-                applyServerSettings(data);
-            } else if (data.type === "sync_reset") {
-                // Settings changed  - reset sync state so subtitles recalibrate
-                state.streamTimeBase = null;
-                state.audioCtxTimeBase = null;
-                state.nextPlayTime = 0;
-                clearSubtitles();
-            }
+            playAudioChunk(event.data);
+            return;
+        }
+        const data = JSON.parse(event.data);
+        if (data.type === "subtitle") {
+            state.lastSubtitle = data;
+            enqueueSubtitle(data);
+        } else if (data.type === "partial") {
+            showPartialSubtitle(data.text);
+        } else if (data.type === "status") {
+            handleStatus(data);
+        } else if (data.type === "settings") {
+            applyServerSettings(data);
+        } else if (data.type === "sync_reset") {
+            // Settings changed  - reset sync state so subtitles recalibrate
+            resetAudio();
+            clearSubtitles();
         }
     });
 
-    state.ws.addEventListener("close", () => {
+    ws.addEventListener("close", () => {
+        if (ws !== state.ws) return;
         $("#connection-status").textContent = "Disconnected";
-        state.capturing = false;
         $("#connection-status").classList.remove("connected");
-        setTimeout(() => {
-            state.reconnectDelay = Math.min(state.reconnectDelay * 2, 30000);
-            connect();
-        }, state.reconnectDelay);
+        state.capturing = false;
+        scheduleReconnect();
     });
 
-    state.ws.addEventListener("error", () => {
-        state.ws.close();
-    });
+    ws.addEventListener("error", () => ws.close());
+}
+
+function scheduleReconnect() {
+    if (state.reconnectTimer) return;
+    const delay = state.reconnectDelay;
+    state.reconnectDelay = Math.min(state.reconnectDelay * 2, 8000);
+    state.reconnectTimer = setTimeout(() => {
+        state.reconnectTimer = null;
+        connect();
+    }, delay);
+}
+
+// Drop the connection and everything buffered behind it, and start again from
+// the live edge. The server replays recent lines on connect, and the ones whose
+// audio has already played come back as history.
+function resync() {
+    const now = performance.now();
+    if (now - lastResyncAt < 1000) return;
+    lastResyncAt = now;
+    resetAudio();
+    clearSubtitles();
+    const old = state.ws;
+    state.ws = null;
+    if (old) {
+        try { old.close(); } catch (e) {}
+    }
+    state.reconnectDelay = 1000;
+    connect();
 }
 
 
@@ -745,13 +846,7 @@ function handleStatus(data) {
         state.capturing = !data.broadcast_audio; // subtitles-only mode is immediately ready
         state.audioBroadcast = data.broadcast_audio !== false;
         // Reset sync state for clean restart
-        state.nextPlayTime = 0;
-        state.streamTimeBase = null;
-        state.audioCtxTimeBase = null;
-        if (state.gainNode) {
-            try { state.gainNode.disconnect(); } catch(e) {}
-            state.gainNode = null;
-        }
+        resetAudio();
         clearSubtitles();
         if (data.broadcast_audio === false) {
             // No audio to buffer  - show "Listening..." immediately
@@ -780,9 +875,7 @@ function handleStatus(data) {
         bs.className = "";
         syncPipSubtitles(true, "Waiting for audio...");
         clearSubtitles();
-        state.nextPlayTime = 0;
-        state.streamTimeBase = null;
-        state.audioCtxTimeBase = null;
+        resetAudio();
         if (state.audioCtx && state.audioCtx.state !== "closed") {
             state.audioCtx.suspend();
         }
@@ -1290,27 +1383,42 @@ if ("documentPictureInPicture" in window) {
     });
 }
 
-// When returning to tab, jump straight to the current subtitle. Background tabs
+// When returning to the tab, catch up to what is playing now. Background tabs
 // freeze requestAnimationFrame, so an in-flight karaoke animation leaves
 // animationId stuck non-null and the render queue stalls until the next message.
 document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
 
-    // Resume audio if the browser suspended the context while backgrounded.
-    if (state.audioCtx && state.audioCtx.state === "suspended") {
+    // Resume audio if the browser suspended or interrupted it while backgrounded.
+    if (state.audioCtx && state.audioCtx.state !== "running" && state.audioCtx.state !== "closed") {
         state.audioCtx.resume().catch(() => {});
+    }
+
+    // Messages stopped while hidden: the page was frozen and the socket is
+    // holding a backlog of stale audio. Start again from live instead.
+    const stalled = lastMessageAt > 0 && performance.now() - lastMessageAt > FREEZE_GAP_MS;
+    if (state.capturing && state.audioBroadcast && stalled) {
+        resync();
+        return;
     }
 
     // Tear down any frozen animation/timer so the render loop can restart.
     if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
     if (showTimer) { clearTimeout(showTimer); showTimer = null; }
 
-    // Drop the backlog and show the most recent subtitle immediately.
-    const latest = subtitleQueue.length > 0
-        ? subtitleQueue[subtitleQueue.length - 1].data
-        : state.lastSubtitle;
-    subtitleQueue.length = 0;
-    if (latest) presentSubtitle(latest);
+    // Show the newest line that is already due. Later ones stay queued for
+    // their audio.
+    const now = Date.now();
+    let due = null;
+    while (subtitleQueue.length > 0 && subtitleQueue[0].showAt <= now) due = subtitleQueue.shift().data;
+    if (!due && subtitleQueue.length === 0) due = state.lastSubtitle;
+    if (due && due !== state.shownSubtitle) presentSubtitle(due);
+    else scheduleNext();
+});
+
+// Restored from the back-forward cache with a dead socket and stale schedule.
+window.addEventListener("pageshow", (e) => {
+    if (e.persisted && state.ws) resync();
 });
 
 // --- Mute toggle ---

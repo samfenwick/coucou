@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import logging
+import socket
+import struct
 import threading
 import time
 
@@ -143,6 +145,34 @@ connected_clients = set()
 active_clients = set()  # clients that are receiving audio/subtitles
 admin_clients = set()
 client_state = {}  # websocket -> {"target_language": "en"}
+
+# websockets' default write_limit. A send that keeps a connection's buffer at or
+# below this returns without waiting for the client to read.
+SEND_HIGH_WATER = 2**15
+# Kernel send buffer for viewer sockets, about 1s of 48kHz mono audio. This caps
+# how much stale audio can queue up for a tab that stops reading, such as an
+# iPad tab in the background.
+VIEWER_SNDBUF = 96 * 1024
+
+
+def _try_send(client, msg):
+    """Start a send that cannot block, or return None to drop msg for this client.
+
+    A viewer whose socket has stopped draining would otherwise stall every
+    broadcast until the keepalive times it out.
+    """
+    transport = getattr(client, "transport", None)
+    if transport is None or transport.is_closing():
+        return None
+    if transport.get_write_buffer_size() + len(msg) > SEND_HIGH_WATER:
+        return None
+    return client.send(msg)
+
+
+async def send_to_viewers(clients, msg):
+    sends = [s for s in (_try_send(c, msg) for c in list(clients)) if s is not None]
+    if sends:
+        await asyncio.gather(*sends, return_exceptions=True)
 
 # --- Settings persistence ---
 
@@ -334,24 +364,15 @@ async def _notify_viewers_settings_changed():
         "overlap_seconds": pipeline["overlap_seconds"],
     })
     reset_msg = json.dumps({"type": "sync_reset"})
-    for client in list(connected_clients):
-        try:
-            await client.send(settings_msg)
-            await client.send(reset_msg)
-        except Exception:
-            pass
+    await send_to_viewers(connected_clients, settings_msg)
+    await send_to_viewers(connected_clients, reset_msg)
 
 
 async def broadcast_status_to_viewers():
     """Send current pipeline status to all connected viewer clients."""
     status_msg = _viewer_status_msg()
     log.debug(f"Broadcasting status '{status_msg['status']}' to {len(connected_clients)} viewers")
-    msg = json.dumps(status_msg)
-    if connected_clients:
-        await asyncio.gather(
-            *[client.send(msg) for client in list(connected_clients)],
-            return_exceptions=True,
-        )
+    await send_to_viewers(connected_clients, json.dumps(status_msg))
 
 
 def transcription_thread_fn(transcription_buffer, transcriber, config):
@@ -882,27 +903,14 @@ async def broadcast_audio():
             read_position += chunk_size
 
             try:
-                # Send raw PCM bytes (int16, mono, 48kHz)  - client decodes synchronously
-                raw_pcm = chunk.tobytes()
+                # Frame: float64 LE stream time, then raw PCM (int16, mono, 48kHz).
+                # Each chunk carries its own position so the client can place
+                # subtitles against it and recognise stale audio.
+                frame = struct.pack("<d", stream_time) + chunk.tobytes()
                 if not pipeline.get("_audio_logged"):
                     log.info(f"First audio chunk sent to {len(active_clients)} clients (stream_time={stream_time:.1f}s)")
                     pipeline["_audio_logged"] = True
-                if active_clients:
-                    # Send stream position periodically so client can sync subtitles
-                    # (every ~200ms regardless of chunk size to avoid flooding)
-                    chunks_since_sync = getattr(broadcast_audio, '_chunks_since_sync', 0)
-                    if chunks_since_sync == 0 or chunks_since_sync * chunk_size >= 9600:
-                        sync_msg = json.dumps({"type": "audio_sync", "stream_time": stream_time})
-                        await asyncio.gather(
-                            *[client.send(sync_msg) for client in active_clients],
-                            return_exceptions=True,
-                        )
-                        broadcast_audio._chunks_since_sync = 0
-                    broadcast_audio._chunks_since_sync = getattr(broadcast_audio, '_chunks_since_sync', 0) + 1
-                    await asyncio.gather(
-                        *[client.send(raw_pcm) for client in active_clients],
-                        return_exceptions=True,
-                    )
+                await send_to_viewers(active_clients, frame)
             except Exception as e:
                 log.warning(f"Broadcast error: {e}")
 
@@ -922,28 +930,23 @@ async def broadcast_subtitles():
 
             # Partial subtitles  - broadcast raw text immediately, no per-client translation
             if subtitle.get("type") == "partial":
-                msg = json.dumps(subtitle)
-                await asyncio.gather(
-                    *[client.send(msg) for client in list(active_clients)],
-                    return_exceptions=True,
-                )
+                await send_to_viewers(active_clients, json.dumps(subtitle))
                 continue
 
             log.debug(f"Broadcasting subtitle to {len(active_clients)} active clients")
+            client_translations = subtitle.get("translations") or {}
+            by_language = {}
             for client in list(active_clients):
-                try:
-                    cs = client_state.get(client, {})
-                    tl = cs.get("target_language", "en")
-                    client_translations = subtitle.get("translations", {})
-                    msg = json.dumps({
-                        **subtitle,
-                        "translation": client_translations.get(tl),
-                        "target_language": tl,
-                        "translations": None,
-                    })
-                    await client.send(msg)
-                except Exception:
-                    pass
+                tl = client_state.get(client, {}).get("target_language", "en")
+                by_language.setdefault(tl, []).append(client)
+            for tl, clients in by_language.items():
+                msg = json.dumps({
+                    **subtitle,
+                    "translation": client_translations.get(tl),
+                    "target_language": tl,
+                    "translations": None,
+                })
+                await send_to_viewers(clients, msg)
         except asyncio.TimeoutError:
             continue
         except Exception as e:
@@ -980,6 +983,12 @@ async def handle_websocket(websocket):
     """Handle a viewer WebSocket connection (passive  - no start/stop control)."""
     connected_clients.add(websocket)
     client_state[websocket] = {"target_language": pipeline.get("default_target_language", "en")}
+    sock = websocket.transport.get_extra_info("socket")
+    if sock is not None:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, VIEWER_SNDBUF)
+        except OSError as e:
+            log.debug(f"Could not set viewer send buffer: {e}")
     log.info(f"Client connected ({len(connected_clients)} total)")
 
     # Send settings
@@ -1009,6 +1018,7 @@ async def handle_websocket(websocket):
                 "translation": translations.get(tl),
                 "target_language": tl,
                 "translations": None,
+                "replay": True,
             }))
 
     try:
@@ -1166,12 +1176,7 @@ async def handle_admin_websocket(websocket):
                             pipeline["subtitle_queue"].get_nowait()
                         except Exception:
                             break
-                    if active_clients:
-                        reset_msg = json.dumps({"type": "sync_reset"})
-                        await asyncio.gather(
-                            *[client.send(reset_msg) for client in list(active_clients)],
-                            return_exceptions=True,
-                        )
+                    await send_to_viewers(active_clients, json.dumps({"type": "sync_reset"}))
                 save_settings()
 
             # After any command, push updated state back to all admins
