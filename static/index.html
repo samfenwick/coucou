@@ -23,6 +23,10 @@
 
     <div id="app" style="display:none">
         <div id="subtitle-area">
+            <div id="interlinear" aria-live="polite">
+                <div id="il-history"></div>
+                <div id="il-current"></div>
+            </div>
             <div id="subtitle-container">
                 <p id="subtitle-text" class="inactive">Waiting for audio...</p>
                 <p id="translation-text"></p>
@@ -113,7 +117,16 @@
 
                 <section class="setting-section">
                     <h3>Display</h3>
-                    <div class="setting-row">
+                    <div class="setting-field">
+                        <label for="layout-select">Bilingual layout</label>
+                        <div class="setting-row">
+                            <select id="layout-select">
+                                <option value="interlinear">Interlinear: English under each phrase</option>
+                                <option value="stacked">Stacked: English below the whole line</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="setting-row" style="margin-top: 0.75rem;">
                         <label class="toggle-label">
                             <input type="checkbox" id="show-original-toggle" checked>
                             <span class="toggle-switch blue"></span>
@@ -145,15 +158,15 @@
                     <div class="setting-field">
                         <label>Original</label>
                         <div class="setting-row">
-                            <input type="range" id="font-size" min="14" max="72" value="32" step="2">
-                            <span id="font-size-label" class="setting-value">32px</span>
+                            <input type="range" id="font-size" min="14" max="96" value="56" step="2">
+                            <span id="font-size-label" class="setting-value">56px</span>
                         </div>
                     </div>
                     <div class="setting-field">
                         <label>Translation</label>
                         <div class="setting-row">
-                            <input type="range" id="translation-font-size" min="12" max="64" value="26" step="2">
-                            <span id="translation-font-size-label" class="setting-value">26px</span>
+                            <input type="range" id="translation-font-size" min="12" max="80" value="36" step="2">
+                            <span id="translation-font-size-label" class="setting-value">36px</span>
                         </div>
                     </div>
                 </section>
@@ -215,6 +228,7 @@
         </div>
     </div>
 
+    <script src="align.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

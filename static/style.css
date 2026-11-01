@@ -9,8 +9,8 @@
     --text-dim: #666;
     --accent: #4a9eff;
     --accent-glow: rgba(74, 158, 255, 0.15);
-    --subtitle-size: 32px;
-    --translation-size: 26px;
+    --subtitle-size: 56px;
+    --translation-size: 36px;
     --radius: 10px;
 
     /* Subtitle colour theme (default: Amber & Ice).
@@ -297,6 +297,166 @@ body {
 .word.active {
     color: var(--original-active);
     text-shadow: 0 0 18px var(--original-active);
+}
+
+/* --- Interlinear layout --- */
+
+/* Each French phrase sits on its own row with its English directly
+   underneath, left-aligned so streamed words never shift what is already on
+   screen. The newest utterance always starts at the anchor line; older ones
+   stack above it, shrink and fade. */
+
+#interlinear {
+    display: none;
+}
+
+.layout-interlinear #subtitle-area {
+    position: relative;
+    overflow: hidden;
+    padding: 0;
+}
+
+.layout-interlinear #interlinear {
+    display: block;
+    position: absolute;
+    inset: 0;
+    --il-anchor: 40%;
+    --il-pad-x: max(1.5rem, 5vw);
+}
+
+/* The classic container still carries status text ("Listening...") and feeds
+   Picture-in-Picture, so it is only hidden once phrases are on screen. */
+.layout-interlinear.il-has-content #subtitle-container {
+    display: none;
+}
+
+#il-history,
+#il-current {
+    position: absolute;
+    left: var(--il-pad-x);
+    right: var(--il-pad-x);
+}
+
+#il-history {
+    top: 0;
+    bottom: calc(100% - var(--il-anchor));
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 0.9rem;
+    padding-bottom: 1.4rem;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 45%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 45%);
+}
+
+#il-current {
+    top: var(--il-anchor);
+    bottom: 0;
+    overflow: hidden;
+}
+
+.il-unit {
+    --il-scale: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: calc(var(--subtitle-size) * var(--il-scale) * 0.32);
+    flex-shrink: 0;
+    transition: opacity 0.4s ease;
+}
+
+#il-current .il-unit {
+    animation: il-in 0.18s ease-out;
+}
+
+@keyframes il-in {
+    from { opacity: 0; }
+}
+
+#il-history .il-unit {
+    --il-scale: 0.62;
+    opacity: 0.16;
+}
+
+#il-history .il-unit:nth-last-child(2) {
+    opacity: 0.3;
+}
+
+#il-history .il-unit:last-child {
+    opacity: 0.55;
+}
+
+/* While the next sentence is still being spoken, the one before it is the
+   newest English on screen, so keep it readable. */
+#interlinear.live #il-history .il-unit:last-child {
+    --il-scale: 0.8;
+    opacity: 0.9;
+}
+
+#interlinear.idle #il-current .il-unit {
+    opacity: 0.5;
+}
+
+.il-pair {
+    display: flex;
+    flex-direction: column;
+    max-width: 100%;
+    text-align: left;
+}
+
+.il-fr {
+    font-size: calc(var(--subtitle-size) * var(--il-scale));
+    font-weight: 600;
+    line-height: 1.18;
+    letter-spacing: 0.005em;
+    color: var(--original-color);
+}
+
+/* The min-height keeps a line reserved while the translation is pending, so
+   its arrival does not push the next phrase down. */
+.il-en {
+    min-height: 1.25em;
+    margin-top: 0.12em;
+    font-size: calc(var(--translation-size) * var(--il-scale));
+    line-height: 1.25;
+    color: var(--translation-color);
+    opacity: 0.82;
+}
+
+#interlinear.mono .il-en {
+    display: none;
+}
+
+#interlinear.no-fr .il-fr {
+    display: none;
+}
+
+#interlinear.no-fr .il-en {
+    margin-top: 0;
+    font-size: calc(var(--subtitle-size) * var(--il-scale));
+    opacity: 1;
+}
+
+.il-pair.il-spk {
+    border-left-style: solid;
+    border-left-width: 3px;
+    padding-left: 0.4em;
+}
+
+.il-en .tr-word {
+    transition: color 0.15s ease, text-shadow 0.15s ease;
+}
+
+.il-en .tr-word.active {
+    color: var(--translation-active);
+    text-shadow: 0 0 16px var(--translation-active);
+}
+
+@media (orientation: landscape) {
+    .layout-interlinear #interlinear {
+        --il-anchor: 34%;
+    }
 }
 
 /* --- Speaker rows --- */

@@ -33,6 +33,7 @@ const state = {
     wordHighlight: localStorage.getItem("subcurrent-word-highlight") !== "false", // on by default
     translationHighlight: localStorage.getItem("subcurrent-tr-highlight") === "true",
     showOriginal: localStorage.getItem("subcurrent-show-original") !== "false", // on by default
+    layout: localStorage.getItem("coucou-layout") || "interlinear",
     targetLanguage: "en",
 };
 
@@ -211,6 +212,7 @@ function clearSubtitles() {
     if (showTimer) { clearTimeout(showTimer); showTimer = null; }
     $("#subtitle-text").textContent = "";
     $("#translation-text").textContent = "";
+    ilClear();
     syncPipSubtitles(true, "");
 }
 
@@ -223,6 +225,8 @@ function clearStaleSubtitle() {
     el.style.display = "";
     $("#translation-text").innerHTML = "";
     $("#subtitle-container").classList.remove("translating");
+    // Interlinear keeps the last lines on screen through a pause, dimmed.
+    ilRoot().classList.add("idle");
     syncPipSubtitles(true, "");
 }
 
@@ -233,13 +237,18 @@ function resetStaleTimer() {
 }
 
 function showPartialSubtitle(text) {
-    // Don't let a partial overwrite a recent final (which has translation)
-    if (Date.now() - lastFinalTime < 2000) return;
+    // Don't let a partial overwrite a recent final (which has translation).
+    // Interlinear keeps that final on screen above the partial, so it needn't wait.
+    const holdFinal = Date.now() - lastFinalTime < 2000;
+    if (holdFinal && !ilEnabled()) return;
     // Cancel any in-progress final subtitle animation
     if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
     if (showTimer) { clearTimeout(showTimer); showTimer = null; }
     // Flush any stale queued subtitles  - partial represents current state
     subtitleQueue.length = 0;
+    if (ilEnabled()) ilShowPartial(text);
+    resetStaleTimer();
+    if (holdFinal) return;
     const el = $("#subtitle-text");
     el.style.display = "";
     el.classList.remove("inactive");
@@ -335,6 +344,147 @@ function renderWordsHtml(words, dimmed) {
     }
 }
 
+// --- Interlinear layout ---
+
+const IL_HISTORY = 3;
+const il = { current: null, partial: false };
+
+function ilEnabled() {
+    return state.layout === "interlinear";
+}
+
+function ilRoot() {
+    return $("#interlinear");
+}
+
+// Build one utterance as phrase pairs. Returns the unit element plus the French
+// word spans (in transcript order) and, for translation highlighting, the
+// English word spans and which of them each French word maps to.
+function ilBuildUnit(frWords, speakers, translation) {
+    const unit = document.createElement("div");
+    unit.className = "il-unit";
+    const wordEls = [];
+    const trWordEls = [];
+    const trMap = [];
+    const multiSpeaker = new Set(speakers.filter((s) => s != null)).size >= 2;
+
+    for (const group of CoucouAlign.alignPhrases(frWords, translation || "")) {
+        const [s, e] = group.fr;
+        const pairEl = document.createElement("div");
+        pairEl.className = "il-pair";
+        if (multiSpeaker) pairEl.classList.add("il-spk", `speaker-${(speakers[s] ?? 0) % 5}`);
+
+        // Every French row gets an English slot so rows keep their place while
+        // the translation is pending. The English goes under the group's last row.
+        let enEl = null;
+        for (const [rs, re] of group.rows) {
+            const frEl = document.createElement("div");
+            frEl.className = "il-fr";
+            for (let i = rs; i < re; i++) {
+                const w = document.createElement("span");
+                w.className = "word";
+                w.textContent = i < re - 1 ? `${frWords[i]} ` : frWords[i];
+                frEl.appendChild(w);
+                wordEls.push(w);
+            }
+            enEl = document.createElement("div");
+            enEl.className = "il-en";
+            pairEl.append(frEl, enEl);
+        }
+
+        const enWords = group.en ? group.en.split(/\s+/) : [];
+        if (state.translationHighlight && enWords.length) {
+            const offset = trWordEls.length;
+            enWords.forEach((t, k) => {
+                const span = document.createElement("span");
+                span.className = "tr-word";
+                span.textContent = k < enWords.length - 1 ? `${t} ` : t;
+                enEl.appendChild(span);
+                trWordEls.push(span);
+            });
+            for (let i = s; i < e; i++) {
+                const progress = (i - s + 1) / (e - s);
+                trMap[i] = offset + Math.min(enWords.length - 1, Math.floor(progress * enWords.length));
+            }
+        } else {
+            enEl.textContent = group.en;
+        }
+        unit.appendChild(pairEl);
+    }
+    return { unit, wordEls, trWordEls, trMap };
+}
+
+// Shrink the newest utterance until it fits below the anchor line. Never grows
+// it back mid-utterance, so streaming text cannot make it pulse.
+function ilFitCurrent() {
+    const box = $("#il-current");
+    const unit = il.current;
+    if (!unit || !box.clientHeight) return;
+    let scale = parseFloat(unit.style.getPropertyValue("--il-scale")) || 1;
+    while (box.scrollHeight > box.clientHeight + 1 && scale > 0.5) {
+        scale = Math.round((scale - 0.06) * 100) / 100;
+        unit.style.setProperty("--il-scale", scale);
+    }
+}
+
+function ilShow(built, partial) {
+    const root = ilRoot();
+    const history = $("#il-history");
+    const current = $("#il-current");
+    if (il.current && il.partial) {
+        // A final replaces the partial it completes, in place.
+        built.unit.style.animation = "none";
+        const scale = il.current.style.getPropertyValue("--il-scale");
+        if (scale) built.unit.style.setProperty("--il-scale", scale);
+        current.replaceChildren(built.unit);
+    } else {
+        if (il.current) {
+            il.current.style.removeProperty("--il-scale");
+            history.appendChild(il.current);
+            while (history.children.length > IL_HISTORY) history.firstElementChild.remove();
+        }
+        current.replaceChildren(built.unit);
+    }
+    il.current = built.unit;
+    il.partial = partial;
+    root.classList.toggle("live", partial);
+    root.classList.remove("idle");
+    $("#app").classList.add("il-has-content");
+    ilFitCurrent();
+}
+
+function ilShowPartial(text) {
+    const words = text.trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return;
+    ilShow(ilBuildUnit(words, [], ""), true);
+}
+
+function ilClear() {
+    $("#il-history").replaceChildren();
+    $("#il-current").replaceChildren();
+    il.current = null;
+    il.partial = false;
+    ilRoot().classList.remove("live", "idle");
+    $("#app").classList.remove("il-has-content");
+}
+
+function ilApplyDisplayFlags() {
+    const root = ilRoot();
+    root.classList.toggle("mono", !(state.translateEnabled && state.translateActive));
+    root.classList.toggle("no-fr", !state.showOriginal && state.translateEnabled && state.translateActive);
+}
+
+function applyLayout(layout) {
+    state.layout = layout === "stacked" ? "stacked" : "interlinear";
+    const app = $("#app");
+    app.classList.toggle("layout-interlinear", state.layout === "interlinear");
+    app.classList.toggle("layout-stacked", state.layout === "stacked");
+    $("#layout-select").value = state.layout;
+    if (state.layout !== "interlinear") ilClear();
+}
+
+window.addEventListener("resize", ilFitCurrent);
+
 function updateLangBar(detectedLang) {
     if (!state.translateEnabled || !detectedLang) return;
     const flag = LANG_FLAGS[detectedLang] || "";
@@ -366,6 +516,19 @@ function showTranslation(translation) {
     }
 }
 
+function ilPresent(data, translation) {
+    const hasWords = data.words && data.words.length > 0;
+    // Word spans must stay index-aligned with data.words for karaoke highlighting.
+    const frWords = hasWords
+        ? data.words.map((w) => String(w.word).trim())
+        : (data.text || "").trim().split(/\s+/).filter(Boolean);
+    if (!frWords.length) return null;
+    const speakers = hasWords ? data.words.map((w) => w.speaker) : [];
+    const built = ilBuildUnit(frWords, speakers, translation);
+    ilShow(built, false);
+    return built;
+}
+
 function presentSubtitle(data) {
     // Cancel any in-progress animation (e.g. provisional being replaced by final)
     if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
@@ -380,6 +543,8 @@ function presentSubtitle(data) {
     showTranslation(activeTranslation);
     if (data.translation) lastFinalTime = Date.now();
     resetStaleTimer();
+
+    const ilBuilt = ilEnabled() ? ilPresent(data, activeTranslation) : null;
 
     if (!data.words || data.words.length === 0) {
         if (hideOriginal) {
@@ -406,6 +571,10 @@ function presentSubtitle(data) {
     syncPipSubtitles(false, null, activeTranslation);
 
     const wordEls = el.querySelectorAll(".word");
+    const ilWordEls = ilBuilt ? ilBuilt.wordEls : [];
+    const ilTrEls = ilBuilt ? ilBuilt.trWordEls : [];
+    const ilTrMap = ilBuilt ? ilBuilt.trMap : [];
+    let prevIlTrIdx = -1;
     // PiP word refs are resolved lazily inside step() so a PiP window opened
     // mid-line picks up live highlighting instead of stalling until the next subtitle.
     let pipWordEls = pipWindow ? pipWindow.document.querySelectorAll("#pip-content .word") : [];
@@ -440,11 +609,21 @@ function presentSubtitle(data) {
                     if (prevIdx >= 0) {
                         wordEls[prevIdx].classList.remove("active");
                         if (pipWordEls[prevIdx]) pipWordEls[prevIdx].classList.remove("active");
+                        if (ilWordEls[prevIdx]) ilWordEls[prevIdx].classList.remove("active");
                     }
                     wordEls[i].classList.add("active");
                     if (pipWordEls[i]) pipWordEls[i].classList.add("active");
+                    if (ilWordEls[i]) ilWordEls[i].classList.add("active");
                 }
                 prevIdx = i;
+
+                // Interlinear: highlight within the English of the same phrase
+                const ilTrIdx = ilTrMap[i] ?? -1;
+                if (ilTrIdx !== prevIlTrIdx) {
+                    if (prevIlTrIdx >= 0) ilTrEls[prevIlTrIdx].classList.remove("active");
+                    if (ilTrIdx >= 0) ilTrEls[ilTrIdx].classList.add("active");
+                    prevIlTrIdx = ilTrIdx;
+                }
 
                 // Proportional translation highlighting (amber)
                 if (trWordEls.length > 0) {
@@ -471,7 +650,9 @@ function presentSubtitle(data) {
             if (state.wordHighlight && prevIdx >= 0) {
                 wordEls[prevIdx].classList.remove("active");
                 if (pipWordEls[prevIdx]) pipWordEls[prevIdx].classList.remove("active");
+                if (ilWordEls[prevIdx]) ilWordEls[prevIdx].classList.remove("active");
             }
+            if (prevIlTrIdx >= 0) ilTrEls[prevIlTrIdx].classList.remove("active");
             if (prevTrIdx >= 0 && trWordEls[prevTrIdx]) {
                 trWordEls[prevTrIdx].classList.remove("active");
                 if (pipTrWordEls[prevTrIdx]) pipTrWordEls[prevTrIdx].classList.remove("active");
@@ -729,6 +910,14 @@ showOriginalEl.checked = state.showOriginal;
 showOriginalEl.addEventListener("change", (e) => {
     state.showOriginal = e.target.checked;
     localStorage.setItem("subcurrent-show-original", e.target.checked ? "true" : "false");
+    ilApplyDisplayFlags();
+});
+
+$("#layout-select").addEventListener("change", (e) => {
+    applyLayout(e.target.value);
+    localStorage.setItem("coucou-layout", state.layout);
+    // Redraw the line on screen in the chosen layout
+    if (state.lastSubtitle && ilEnabled()) ilPresent(state.lastSubtitle, state.translateActive ? state.lastSubtitle.translation : null);
 });
 
 // Karaoke highlight toggles
@@ -758,6 +947,8 @@ if (savedFontSize) applyFontSize(savedFontSize);
 const savedTranslationSize = localStorage.getItem("subcurrent-translation-size");
 if (savedTranslationSize) applyTranslationSize(savedTranslationSize);
 applyTheme(localStorage.getItem("subcurrent-theme") || "amber-ice");
+applyLayout(state.layout);
+ilApplyDisplayFlags();
 const savedVolume = localStorage.getItem("subcurrent-volume");
 if (savedVolume) applyVolume(savedVolume);
 const savedTranslate = localStorage.getItem("coucou-translate-active");
@@ -767,6 +958,7 @@ $("#translate-toggle").textContent = "\u{1F30D}";
 
 // Translate toggle  - click the flag bar to toggle translations on/off
 function updateTranslateBarUI() {
+    ilApplyDisplayFlags();
     const bar = $("#translate-bar");
     if (!state.translateEnabled) {
         bar.style.display = "none";
@@ -1047,8 +1239,8 @@ function syncPipTheme() {
 // Ratio of translation size to original size, so PiP honours the slider pair.
 function trSizeRatio() {
     const cs = getComputedStyle(document.documentElement);
-    const o = parseFloat(cs.getPropertyValue("--subtitle-size")) || 32;
-    const t = parseFloat(cs.getPropertyValue("--translation-size")) || 26;
+    const o = parseFloat(cs.getPropertyValue("--subtitle-size")) || 56;
+    const t = parseFloat(cs.getPropertyValue("--translation-size")) || 36;
     return t / o;
 }
 
