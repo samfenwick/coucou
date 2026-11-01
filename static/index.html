@@ -23,9 +23,11 @@
 
     <div id="app" style="display:none">
         <div id="subtitle-area">
-            <div id="interlinear" aria-live="polite">
-                <div id="il-history"></div>
-                <div id="il-current"></div>
+            <div id="interlinear">
+                <div id="il-scroll" aria-live="polite">
+                    <div id="il-track"></div>
+                </div>
+                <button id="il-live" type="button" hidden>Live</button>
             </div>
             <div id="subtitle-container">
                 <p id="subtitle-text" class="inactive">Waiting for audio...</p>
@@ -123,6 +125,15 @@
                             <select id="layout-select">
                                 <option value="interlinear">Interlinear: English under each phrase</option>
                                 <option value="stacked">Stacked: English below the whole line</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="setting-field" style="margin-top: 0.75rem;">
+                        <label for="tr-position-select">Translation position</label>
+                        <div class="setting-row">
+                            <select id="tr-position-select">
+                                <option value="below">Below the original</option>
+                                <option value="above">Above the original</option>
                             </select>
                         </div>
                     </div>

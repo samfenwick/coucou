@@ -302,9 +302,10 @@ body {
 /* --- Interlinear layout --- */
 
 /* Each French phrase sits on its own row with its English directly
-   underneath, left-aligned so streamed words never shift what is already on
-   screen. The newest utterance always starts at the anchor line; older ones
-   stack above it, shrink and fade. */
+   underneath. Utterances run as one scrolling column: what has been said
+   above, what is coming below, and the row being spoken held in the middle of
+   the screen. Rows only change opacity as the speech moves on, never size, so
+   nothing reflows. */
 
 #interlinear {
     display: none;
@@ -320,7 +321,6 @@ body {
     display: block;
     position: absolute;
     inset: 0;
-    --il-anchor: 40%;
     --il-pad-x: max(1.5rem, 5vw);
 }
 
@@ -330,83 +330,102 @@ body {
     display: none;
 }
 
-#il-history,
-#il-current {
+#il-scroll {
     position: absolute;
-    left: var(--il-pad-x);
-    right: var(--il-pad-x);
+    inset: 0;
+    overflow-y: auto;
+    overflow-anchor: none;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28%, #000 74%, transparent 100%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 28%, #000 74%, transparent 100%);
 }
 
-#il-history {
-    top: 0;
-    bottom: calc(100% - var(--il-anchor));
+#il-scroll::-webkit-scrollbar {
+    display: none;
+}
+
+/* Half a screen of space at each end, so the first and last rows can still be
+   scrolled to the middle. */
+#il-scroll::before,
+#il-scroll::after {
+    content: "";
+    display: block;
+    height: 50%;
+}
+
+#interlinear.browsing #il-scroll {
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 10%, #000 90%, transparent 100%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 10%, #000 90%, transparent 100%);
+}
+
+#il-track {
+    width: min(calc(100% - 2 * var(--il-pad-x)), calc(var(--subtitle-size) * 18));
+    margin: 0 auto;
     display: flex;
     flex-direction: column;
-    justify-content: flex-end;
-    gap: 0.9rem;
-    padding-bottom: 1.4rem;
-    overflow: hidden;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 45%);
-    mask-image: linear-gradient(to bottom, transparent 0, #000 45%);
+    gap: calc(var(--subtitle-size) * 0.55);
 }
 
-#il-current {
-    top: var(--il-anchor);
-    bottom: 0;
-    overflow: hidden;
-}
-
+/* Units without a state class are lines whose audio has not played yet. */
 .il-unit {
-    --il-scale: 1;
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
-    gap: calc(var(--subtitle-size) * var(--il-scale) * 0.32);
-    flex-shrink: 0;
+    gap: calc(var(--subtitle-size) * 0.32);
+    opacity: 0.4;
     transition: opacity 0.4s ease;
-}
-
-#il-current .il-unit {
-    animation: il-in 0.18s ease-out;
+    animation: il-in 0.25s ease-out;
 }
 
 @keyframes il-in {
     from { opacity: 0; }
 }
 
-#il-history .il-unit {
-    --il-scale: 0.62;
-    opacity: 0.16;
-}
-
-#il-history .il-unit:nth-last-child(2) {
+.il-unit.il-past {
     opacity: 0.3;
 }
 
-#il-history .il-unit:last-child {
-    opacity: 0.55;
+.il-unit.il-current {
+    opacity: 1;
 }
 
-/* While the next sentence is still being spoken, the one before it is the
-   newest English on screen, so keep it readable. */
-#interlinear.live #il-history .il-unit:last-child {
-    --il-scale: 0.8;
-    opacity: 0.9;
+#interlinear.live .il-unit.il-prev {
+    opacity: 0.85;
 }
 
-#interlinear.idle #il-current .il-unit {
+#interlinear.idle .il-unit.il-current {
     opacity: 0.5;
+}
+
+/* Scrolled back: everything readable. */
+#interlinear.browsing .il-unit {
+    opacity: 0.85;
 }
 
 .il-pair {
     display: flex;
     flex-direction: column;
+    align-items: center;
     max-width: 100%;
+    text-align: center;
+    transition: opacity 0.35s ease;
+}
+
+/* Within the utterance being spoken, the row being spoken stands out. */
+.il-unit.il-current:not(.il-whole) .il-pair:not(.il-now) {
+    opacity: 0.5;
+}
+
+/* A partial grows word by word. Its rows start at the left edge of the
+   column so words already on screen keep their place. */
+.il-stream .il-pair {
+    align-items: flex-start;
     text-align: left;
 }
 
 .il-fr {
-    font-size: calc(var(--subtitle-size) * var(--il-scale));
+    font-size: var(--subtitle-size);
     font-weight: 600;
     line-height: 1.18;
     letter-spacing: 0.005em;
@@ -418,10 +437,16 @@ body {
 .il-en {
     min-height: 1.25em;
     margin-top: 0.12em;
-    font-size: calc(var(--translation-size) * var(--il-scale));
+    font-size: var(--translation-size);
     line-height: 1.25;
     color: var(--translation-color);
     opacity: 0.82;
+}
+
+#app.tr-above .il-en-main {
+    order: -1;
+    margin-top: 0;
+    margin-bottom: 0.12em;
 }
 
 #interlinear.mono .il-en {
@@ -433,8 +458,8 @@ body {
 }
 
 #interlinear.no-fr .il-en {
-    margin-top: 0;
-    font-size: calc(var(--subtitle-size) * var(--il-scale));
+    margin: 0;
+    font-size: var(--subtitle-size);
     opacity: 1;
 }
 
@@ -453,10 +478,48 @@ body {
     text-shadow: 0 0 16px var(--translation-active);
 }
 
-@media (orientation: landscape) {
-    .layout-interlinear #interlinear {
-        --il-anchor: 34%;
-    }
+#il-live {
+    position: absolute;
+    left: 50%;
+    bottom: 1.25rem;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.55rem 1.2rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(20, 20, 20, 0.88);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+#il-live::before {
+    content: "";
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: #ff4d4d;
+}
+
+#il-live[hidden] {
+    display: none;
+}
+
+/* Stacked layout with the translation shown above the original */
+.layout-stacked.tr-above #subtitle-container {
+    display: flex;
+    flex-direction: column-reverse;
+    align-items: center;
+}
+
+.layout-stacked.tr-above #translation-text {
+    margin: 0 0 0.5rem;
 }
 
 /* --- Speaker rows --- */

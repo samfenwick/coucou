@@ -34,6 +34,9 @@ const state = {
     translationHighlight: localStorage.getItem("subcurrent-tr-highlight") === "true",
     showOriginal: localStorage.getItem("subcurrent-show-original") !== "false", // on by default
     layout: localStorage.getItem("coucou-layout") || "interlinear",
+    // French on top with the smaller English under it: the top line gets read
+    // first and longest, so this keeps the eye on the French.
+    trPosition: localStorage.getItem("coucou-tr-position") === "above" ? "above" : "below",
     targetLanguage: "en",
 };
 
@@ -134,6 +137,7 @@ function markSynced(streamTime, ctxTime) {
             if (ilEnabled()) ilAddHistory(data);
         }
         subtitleQueue.sort((a, b) => a.showAt - b.showAt);
+        ilSyncUpcoming();
         if (!animationId && !showTimer) scheduleNext();
     }
 }
@@ -289,6 +293,9 @@ function showPartialSubtitle(text) {
     if (animationId) { clearTimeout(animationId); animationId = null; }
     if (showTimer) { clearTimeout(showTimer); showTimer = null; }
     // Flush any stale queued subtitles  - partial represents current state
+    for (const { data } of subtitleQueue) {
+        if (data.ilBuilt && data.ilBuilt.unit.classList.contains("il-next")) ilSetPast(data.ilBuilt.unit);
+    }
     subtitleQueue.length = 0;
     if (ilEnabled()) ilShowPartial(text);
     resetStaleTimer();
@@ -338,6 +345,7 @@ function enqueueSubtitle(data) {
     // catches up to the audio instead of replaying.
     subtitleQueue.push({ data, showAt });
     subtitleQueue.sort((a, b) => a.showAt - b.showAt);
+    ilSyncUpcoming();
 
     // Kick off processing if idle
     if (!animationId && !showTimer) scheduleNext();
@@ -398,8 +406,20 @@ function renderWordsHtml(words, dimmed) {
 
 // --- Interlinear layout ---
 
-const IL_HISTORY = 3;
-const il = { current: null, partial: false };
+// Past utterances kept for scrolling back through.
+const IL_KEEP = 80;
+// After the reader scrolls away from the live line, go back to it once the
+// screen has been left alone this long.
+const IL_RESUME_MS = 4000;
+const il = {
+    current: null,   // utterance being spoken
+    partial: false,  // current is a partial still being streamed
+    focus: null,     // row being spoken, held in the middle of the screen
+    browsing: false, // reader has scrolled away from the live line
+    touching: false,
+    resumeTimer: null,
+    followTarget: NaN,
+};
 
 function ilEnabled() {
     return state.layout === "interlinear";
@@ -427,7 +447,8 @@ function ilBuildUnit(frWords, speakers, translation) {
         if (multiSpeaker) pairEl.classList.add("il-spk", `speaker-${(speakers[s] ?? 0) % 5}`);
 
         // Every French row gets an English slot so rows keep their place while
-        // the translation is pending. The English goes under the group's last row.
+        // the translation is pending. The English goes in the group's last slot,
+        // which CSS moves to the top when the translation is shown above.
         let enEl = null;
         for (const [rs, re] of group.rows) {
             const frEl = document.createElement("div");
@@ -443,6 +464,7 @@ function ilBuildUnit(frWords, speakers, translation) {
             enEl.className = "il-en";
             pairEl.append(frEl, enEl);
         }
+        enEl.classList.add("il-en-main");
 
         const enWords = group.en ? group.en.split(/\s+/) : [];
         if (state.translationHighlight && enWords.length) {
@@ -466,85 +488,257 @@ function ilBuildUnit(frWords, speakers, translation) {
     return { unit, wordEls, trWordEls, trMap };
 }
 
-// Shrink the newest utterance until it fits below the anchor line. Never grows
-// it back mid-utterance, so streaming text cannot make it pulse.
-function ilFitCurrent() {
-    const box = $("#il-current");
-    const unit = il.current;
-    if (!unit || !box.clientHeight) return;
-    let scale = parseFloat(unit.style.getPropertyValue("--il-scale")) || 1;
-    while (box.scrollHeight > box.clientHeight + 1 && scale > 0.5) {
-        scale = Math.round((scale - 0.06) * 100) / 100;
-        unit.style.setProperty("--il-scale", scale);
-    }
+// Word spans must stay index-aligned with data.words for karaoke highlighting.
+function ilBuildFromData(data) {
+    const hasWords = data.words && data.words.length > 0;
+    const frWords = hasWords
+        ? data.words.map((w) => String(w.word).trim())
+        : (data.text || "").trim().split(/\s+/).filter(Boolean);
+    if (!frWords.length) return null;
+    const speakers = hasWords ? data.words.map((w) => w.speaker) : [];
+    return ilBuildUnit(frWords, speakers, state.translateActive ? data.translation : "");
 }
 
-function ilShow(built, partial) {
-    const root = ilRoot();
-    const history = $("#il-history");
-    const current = $("#il-current");
+function ilSetPast(unit) {
+    unit.classList.remove("il-current", "il-next", "il-whole");
+    unit.classList.add("il-past");
+    for (const p of unit.querySelectorAll(".il-now")) p.classList.remove("il-now");
+}
+
+// Make an utterance the one being spoken. `timed` means it has word timings,
+// so the focus can follow the speech row by row.
+function ilShow(built, partial, timed) {
+    const track = $("#il-track");
+    const unit = built.unit;
     if (il.current && il.partial) {
-        // A final replaces the partial it completes, in place.
-        built.unit.style.animation = "none";
-        const scale = il.current.style.getPropertyValue("--il-scale");
-        if (scale) built.unit.style.setProperty("--il-scale", scale);
-        current.replaceChildren(built.unit);
+        // A final replaces the partial it completes, in place and with the
+        // same alignment, so no word moves.
+        unit.style.animation = "none";
+        unit.classList.add("il-stream");
+        il.current.replaceWith(unit);
     } else {
+        for (const u of track.querySelectorAll(".il-prev")) u.classList.remove("il-prev");
         if (il.current) {
-            il.current.style.removeProperty("--il-scale");
-            history.appendChild(il.current);
-            while (history.children.length > IL_HISTORY) history.firstElementChild.remove();
+            ilSetPast(il.current);
+            // While the next sentence is being streamed, the one before it is
+            // the newest English on screen, so it stays readable.
+            if (partial) il.current.classList.add("il-prev");
         }
-        current.replaceChildren(built.unit);
+        if (!unit.isConnected) track.insertBefore(unit, track.querySelector(".il-next"));
     }
-    il.current = built.unit;
+    // Anything queued ahead of this line was skipped to catch up with the audio.
+    for (let p = unit.previousElementSibling; p && p.classList.contains("il-next"); p = p.previousElementSibling) {
+        ilSetPast(p);
+    }
+    unit.classList.remove("il-next", "il-past");
+    unit.classList.add("il-current");
+    if (partial) unit.classList.add("il-stream");
+    unit.classList.toggle("il-whole", !timed);
+    il.current = unit;
     il.partial = partial;
+
+    const root = ilRoot();
     root.classList.toggle("live", partial);
     root.classList.remove("idle");
     $("#app").classList.add("il-has-content");
-    ilFitCurrent();
+    ilPrune();
+
+    const pairs = unit.querySelectorAll(".il-pair");
+    if (timed) ilSetFocus(pairs[0]);
+    else if (unit.classList.contains("il-stream")) ilSetFocus(pairs[pairs.length - 1]);
+    else ilSetFocus(unit);
+}
+
+function ilSetFocus(el) {
+    if (il.focus === el) return;
+    if (il.focus) il.focus.classList.remove("il-now");
+    il.focus = el || null;
+    if (el && el.classList.contains("il-pair")) el.classList.add("il-now");
+    ilFollow();
+}
+
+// Scroll offset that puts the focused row in the middle of the screen.
+function ilFocusTop(scroller) {
+    let el = il.focus && il.focus.isConnected ? il.focus : null;
+    if (!el) {
+        const past = scroller.querySelectorAll(".il-past");
+        el = past[past.length - 1];
+    }
+    if (!el) return null;
+    const view = scroller.clientHeight;
+    const r = el.getBoundingClientRect();
+    const top = r.top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+    let h = r.height;
+    if (el.closest(".il-stream")) {
+        // A streamed row grows downwards when it wraps. Centre it on its first
+        // line so the wrap does not scroll the screen.
+        const css = getComputedStyle(document.documentElement);
+        const oneLine = parseFloat(css.getPropertyValue("--subtitle-size")) * 1.2
+            + parseFloat(css.getPropertyValue("--translation-size")) * 1.4;
+        h = Math.min(h, oneLine);
+    }
+    if (h > view * 0.7) return top - view * 0.15;
+    return top + h / 2 - view / 2;
+}
+
+function ilFollow(instant = false) {
+    if (il.browsing) return;
+    const scroller = $("#il-scroll");
+    const top = ilFocusTop(scroller);
+    if (top == null) return;
+    const target = Math.round(Math.max(0, Math.min(top, scroller.scrollHeight - scroller.clientHeight)));
+    if (!instant && Math.abs(target - il.followTarget) < 1) return;
+    il.followTarget = target;
+    scroller.scrollTo({ top: target, behavior: instant ? "auto" : "smooth" });
+}
+
+// Drop the oldest history, keeping what is on screen where it is.
+function ilPrune() {
+    if (il.browsing) return;
+    const scroller = $("#il-scroll");
+    const track = $("#il-track");
+    let past = track.querySelectorAll(".il-past").length;
+    let shift = 0;
+    while (past > IL_KEEP && track.firstElementChild.classList.contains("il-past")) {
+        const first = track.firstElementChild;
+        const next = first.nextElementSibling;
+        shift += next ? next.offsetTop - first.offsetTop : first.offsetHeight;
+        first.remove();
+        past--;
+    }
+    if (shift) {
+        scroller.scrollTop -= shift;
+        il.followTarget = NaN;
+    }
+}
+
+// Lines that arrived ahead of their audio go below the current one, dimmed,
+// in the order they will be spoken.
+function ilSyncUpcoming() {
+    if (!ilEnabled() || il.partial) return;
+    const track = $("#il-track");
+    let before = null;
+    for (let i = subtitleQueue.length - 1; i >= 0; i--) {
+        const { data, showAt } = subtitleQueue[i];
+        const existing = data.ilBuilt && data.ilBuilt.unit.isConnected ? data.ilBuilt.unit : null;
+        if (existing) {
+            if (existing.classList.contains("il-next")) before = existing;
+            continue;
+        }
+        if (!Number.isFinite(showAt)) continue;
+        const built = ilBuildFromData(data);
+        if (!built) continue;
+        built.unit.classList.add("il-next");
+        data.ilBuilt = built;
+        track.insertBefore(built.unit, before);
+        before = built.unit;
+        $("#app").classList.add("il-has-content");
+    }
 }
 
 // Add an utterance straight to history, for lines that played before this tab
 // connected.
 function ilAddHistory(data) {
-    const frWords = data.words && data.words.length
-        ? data.words.map((w) => String(w.word).trim())
-        : (data.text || "").trim().split(/\s+/).filter(Boolean);
-    if (!frWords.length) return;
-    const built = ilBuildUnit(frWords, [], state.translateActive ? data.translation : "");
-    const history = $("#il-history");
+    const built = ilBuildFromData(data);
+    if (!built) return;
+    const track = $("#il-track");
     if (il.current) {
         // Keep history in order: anything already on screen is older.
-        history.appendChild(il.current);
+        ilSetPast(il.current);
         il.current = null;
         il.partial = false;
-        $("#il-current").replaceChildren();
+        ilSetFocus(null);
     }
-    history.appendChild(built.unit);
-    while (history.children.length > IL_HISTORY) history.firstElementChild.remove();
+    built.unit.classList.add("il-past");
+    track.insertBefore(built.unit, track.querySelector(".il-next"));
     $("#app").classList.add("il-has-content");
+    ilPrune();
+    ilFollow();
 }
 
 function ilShowPartial(text) {
     const words = text.trim().split(/\s+/).filter(Boolean);
     if (!words.length) return;
-    ilShow(ilBuildUnit(words, [], ""), true);
+    ilShow(ilBuildUnit(words, [], ""), true, false);
+}
+
+function ilPresent(data) {
+    let built = data.ilBuilt;
+    if (!built || !built.unit.classList.contains("il-next") || !built.unit.isConnected) {
+        built = ilBuildFromData(data);
+    }
+    if (!built) return null;
+    data.ilBuilt = built;
+    ilShow(built, false, !!(data.words && data.words.length));
+    return built;
 }
 
 function ilClear() {
-    $("#il-history").replaceChildren();
-    $("#il-current").replaceChildren();
+    $("#il-track").replaceChildren();
     il.current = null;
     il.partial = false;
+    il.focus = null;
+    il.followTarget = NaN;
+    ilStopBrowsing();
     ilRoot().classList.remove("live", "idle");
     $("#app").classList.remove("il-has-content");
+}
+
+// --- Scrolling back through history ---
+
+function ilBrowse() {
+    if (!il.browsing) {
+        il.browsing = true;
+        ilRoot().classList.add("browsing");
+        $("#il-live").hidden = false;
+    }
+    ilArmResume();
+}
+
+function ilArmResume() {
+    clearTimeout(il.resumeTimer);
+    if (!il.touching) il.resumeTimer = setTimeout(ilResume, IL_RESUME_MS);
+}
+
+function ilStopBrowsing() {
+    clearTimeout(il.resumeTimer);
+    il.browsing = false;
+    ilRoot().classList.remove("browsing");
+    $("#il-live").hidden = true;
+}
+
+function ilResume() {
+    ilStopBrowsing();
+    il.followTarget = NaN;
+    ilPrune();
+    ilFollow();
+}
+
+{
+    const scroller = $("#il-scroll");
+    const endTouch = () => {
+        il.touching = false;
+        if (il.browsing) ilArmResume();
+    };
+    // Only a drag or a wheel counts as scrolling back. A tap does not.
+    scroller.addEventListener("touchstart", () => {
+        il.touching = true;
+        clearTimeout(il.resumeTimer);
+    }, { passive: true });
+    scroller.addEventListener("touchmove", ilBrowse, { passive: true });
+    scroller.addEventListener("touchend", endTouch);
+    scroller.addEventListener("touchcancel", endTouch);
+    scroller.addEventListener("wheel", ilBrowse, { passive: true });
+    // Momentum keeps scrolling after the finger lifts; wait for it to settle.
+    scroller.addEventListener("scroll", () => { if (il.browsing) ilArmResume(); }, { passive: true });
+    $("#il-live").addEventListener("click", ilResume);
 }
 
 function ilApplyDisplayFlags() {
     const root = ilRoot();
     root.classList.toggle("mono", !(state.translateEnabled && state.translateActive));
     root.classList.toggle("no-fr", !state.showOriginal && state.translateEnabled && state.translateActive);
+    $("#app").classList.toggle("tr-above", state.trPosition === "above");
 }
 
 function applyLayout(layout) {
@@ -556,7 +750,10 @@ function applyLayout(layout) {
     if (state.layout !== "interlinear") ilClear();
 }
 
-window.addEventListener("resize", ilFitCurrent);
+window.addEventListener("resize", () => {
+    il.followTarget = NaN;
+    ilFollow(true);
+});
 
 function updateLangBar(detectedLang) {
     if (!state.translateEnabled || !detectedLang) return;
@@ -589,19 +786,6 @@ function showTranslation(translation) {
     }
 }
 
-function ilPresent(data, translation) {
-    const hasWords = data.words && data.words.length > 0;
-    // Word spans must stay index-aligned with data.words for karaoke highlighting.
-    const frWords = hasWords
-        ? data.words.map((w) => String(w.word).trim())
-        : (data.text || "").trim().split(/\s+/).filter(Boolean);
-    if (!frWords.length) return null;
-    const speakers = hasWords ? data.words.map((w) => w.speaker) : [];
-    const built = ilBuildUnit(frWords, speakers, translation);
-    ilShow(built, false);
-    return built;
-}
-
 function presentSubtitle(data) {
     state.shownSubtitle = data;
     // Cancel any in-progress animation (e.g. provisional being replaced by final)
@@ -618,7 +802,7 @@ function presentSubtitle(data) {
     if (data.translation) lastFinalTime = Date.now();
     resetStaleTimer();
 
-    const ilBuilt = ilEnabled() ? ilPresent(data, activeTranslation) : null;
+    const ilBuilt = ilEnabled() ? ilPresent(data) : null;
 
     if (!data.words || data.words.length === 0) {
         if (hideOriginal) {
@@ -717,6 +901,10 @@ function presentSubtitle(data) {
             } else {
                 break;
             }
+        }
+        // Keep the row being spoken in the middle of the screen
+        if (ilBuilt && ilBuilt.unit === il.current && ilWordEls[prevIdx]) {
+            ilSetFocus(ilWordEls[prevIdx].closest(".il-pair"));
         }
 
         if (elapsed < totalMs) {
@@ -1029,6 +1217,16 @@ $("#theme-swatches").addEventListener("click", (e) => {
 });
 
 // Show original toggle
+const trPositionEl = $("#tr-position-select");
+trPositionEl.value = state.trPosition;
+trPositionEl.addEventListener("change", (e) => {
+    state.trPosition = e.target.value === "above" ? "above" : "below";
+    localStorage.setItem("coucou-tr-position", state.trPosition);
+    ilApplyDisplayFlags();
+    il.followTarget = NaN;
+    ilFollow(true);
+});
+
 const showOriginalEl = $("#show-original-toggle");
 showOriginalEl.checked = state.showOriginal;
 showOriginalEl.addEventListener("change", (e) => {
@@ -1041,7 +1239,7 @@ $("#layout-select").addEventListener("change", (e) => {
     applyLayout(e.target.value);
     localStorage.setItem("coucou-layout", state.layout);
     // Redraw the line on screen in the chosen layout
-    if (state.lastSubtitle && ilEnabled()) ilPresent(state.lastSubtitle, state.translateActive ? state.lastSubtitle.translation : null);
+    if (state.lastSubtitle && ilEnabled()) ilPresent(state.lastSubtitle);
 });
 
 // Karaoke highlight toggles
