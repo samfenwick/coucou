@@ -24,7 +24,7 @@ const state = {
     audioCtx: null,
     nextPlayTime: 0,
     volume: 0.8,
-    reconnectDelay: 1000,
+    reconnectDelay: 300,
     // Audio-subtitle sync: maps stream time → AudioContext time
     streamTimeBase: null,   // stream_time of first audio chunk
     audioCtxTimeBase: null, // audioCtx.currentTime when that chunk was scheduled
@@ -168,18 +168,19 @@ function setVolume(vol) {
     rampGain(vol, 0.03);
 }
 
-// Drop everything scheduled and forget the audio-to-stream mapping. The next
-// chunk starts fresh at the live edge with a fade-in.
+// Fade out and drop everything scheduled, and forget the audio-to-stream
+// mapping. The next chunk starts fresh at the live edge with a fade-in.
+const FADE_OUT = 0.03;
+
 function resetAudio() {
-    for (const src of liveSources) {
-        try { src.stop(); } catch (e) {}
+    if (state.gainNode) {
+        rampGain(0, FADE_OUT);
+        const stopAt = state.audioCtx.currentTime + FADE_OUT;
+        for (const src of liveSources) {
+            try { src.stop(stopAt); } catch (e) {}
+        }
     }
     liveSources.clear();
-    if (state.gainNode) {
-        const now = state.audioCtx.currentTime;
-        state.gainNode.gain.cancelScheduledValues(now);
-        state.gainNode.gain.setValueAtTime(0, now);
-    }
     state.nextPlayTime = 0;
     state.streamTimeBase = null;
     state.audioCtxTimeBase = null;
@@ -229,8 +230,9 @@ function playAudioChunk(frame) {
         source.start(state.nextPlayTime);
 
         if (coldStart) {
+            // Leaves any fade-out from resetAudio in place before this point
             const g = state.gainNode.gain;
-            g.cancelScheduledValues(now);
+            g.cancelScheduledValues(state.nextPlayTime);
             g.setValueAtTime(0, state.nextPlayTime);
             g.linearRampToValueAtTime(state.volume, state.nextPlayTime + FADE_IN);
         }
@@ -241,7 +243,7 @@ function playAudioChunk(frame) {
     }
 }
 
-// --- Subtitle Rendering (queue + requestAnimationFrame) ---
+// --- Subtitle Rendering (queue + word timers) ---
 
 const subtitleQueue = [];
 let animationId = null;
@@ -249,11 +251,12 @@ let showTimer = null;
 
 function clearSubtitles() {
     subtitleQueue.length = 0;
-    if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
+    if (animationId) { clearTimeout(animationId); animationId = null; }
     if (showTimer) { clearTimeout(showTimer); showTimer = null; }
     $("#subtitle-text").textContent = "";
     $("#translation-text").textContent = "";
     ilClear();
+    seenSubtitles.clear();
     syncPipSubtitles(true, "");
 }
 
@@ -283,7 +286,7 @@ function showPartialSubtitle(text) {
     const holdFinal = Date.now() - lastFinalTime < 2000;
     if (holdFinal && !ilEnabled()) return;
     // Cancel any in-progress final subtitle animation
-    if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
+    if (animationId) { clearTimeout(animationId); animationId = null; }
     if (showTimer) { clearTimeout(showTimer); showTimer = null; }
     // Flush any stale queued subtitles  - partial represents current state
     subtitleQueue.length = 0;
@@ -301,7 +304,16 @@ function showPartialSubtitle(text) {
     resetStaleTimer();
 }
 
+// Lines already received on this screen. The server replays recent lines on
+// every connect, and after a network blip those are already showing.
+const seenSubtitles = new Set();
+
 function enqueueSubtitle(data) {
+    const key = `${data.start}|${data.text}|${data.translation}`;
+    if (seenSubtitles.has(key)) return;
+    seenSubtitles.add(key);
+    if (seenSubtitles.size > 100) seenSubtitles.delete(seenSubtitles.values().next().value);
+
     if (state.streamTimeBase == null) {
         if (state.audioBroadcast && data.start != null) {
             // Sync not established yet (just connected mid-stream). Defer until
@@ -593,7 +605,7 @@ function ilPresent(data, translation) {
 function presentSubtitle(data) {
     state.shownSubtitle = data;
     // Cancel any in-progress animation (e.g. provisional being replaced by final)
-    if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
+    if (animationId) { clearTimeout(animationId); animationId = null; }
     if (showTimer) { clearTimeout(showTimer); showTimer = null; }
     const el = $("#subtitle-text");
     el.classList.remove("inactive");
@@ -708,7 +720,12 @@ function presentSubtitle(data) {
         }
 
         if (elapsed < totalMs) {
-            animationId = requestAnimationFrame(step);
+            // Wake only at the next word boundary. A per-frame loop would run
+            // 120 times a second on a ProMotion iPad for a few changes a second.
+            const next = prevIdx + 1 < data.words.length
+                ? (data.words[prevIdx + 1].start - firstStart) * 1000
+                : totalMs;
+            animationId = setTimeout(step, Math.max(0, next - elapsed));
         } else {
             if (state.wordHighlight && prevIdx >= 0) {
                 wordEls[prevIdx].classList.remove("active");
@@ -725,7 +742,7 @@ function presentSubtitle(data) {
         }
     }
 
-    animationId = requestAnimationFrame(step);
+    animationId = setTimeout(step, 0);
 }
 
 // --- WebSocket ---
@@ -738,6 +755,11 @@ let lastResyncAt = 0;
 
 function connect() {
     if (state.reconnectTimer) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; }
+    const old = state.ws;
+    state.ws = null;
+    if (old && old.readyState <= WebSocket.OPEN) {
+        try { old.close(); } catch (e) {}
+    }
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${protocol}//${location.host}`);
     ws.binaryType = "arraybuffer";
@@ -748,7 +770,7 @@ function connect() {
         if (ws !== state.ws) return;
         $("#connection-status").textContent = "Connected";
         $("#connection-status").classList.add("connected");
-        state.reconnectDelay = 1000;
+        state.reconnectDelay = 300;
     });
 
     ws.addEventListener("message", (event) => {
@@ -813,14 +835,19 @@ function resync() {
     lastResyncAt = now;
     resetAudio();
     clearSubtitles();
-    const old = state.ws;
-    state.ws = null;
-    if (old) {
-        try { old.close(); } catch (e) {}
-    }
-    state.reconnectDelay = 1000;
+    state.reconnectDelay = 300;
     connect();
 }
+
+// Back on the network, or back in view with a dead socket: reconnect now
+// instead of waiting out the backoff.
+function reconnectIfDown() {
+    if (!state.ws || state.ws.readyState === WebSocket.CLOSED || state.ws.readyState === WebSocket.CLOSING) {
+        state.reconnectDelay = 300;
+        connect();
+    }
+}
+window.addEventListener("online", () => { if (state.reconnectTimer || state.ws) reconnectIfDown(); });
 
 
 function handleStatus(data) {
@@ -876,9 +903,13 @@ function handleStatus(data) {
         syncPipSubtitles(true, "Waiting for audio...");
         clearSubtitles();
         resetAudio();
-        if (state.audioCtx && state.audioCtx.state !== "closed") {
-            state.audioCtx.suspend();
-        }
+        // Suspend once the fade-out has played, to stop the audio thread
+        // while nothing is broadcasting.
+        setTimeout(() => {
+            if (!state.capturing && state.audioCtx && state.audioCtx.state === "running") {
+                state.audioCtx.suspend();
+            }
+        }, 100);
     }
 }
 
@@ -1105,17 +1136,44 @@ $("#output-select").addEventListener("change", () => {
     if (state.audioCtx) routeToSelectedOutput();
 });
 
-// --- Wake Lock ---
+// --- Keep the screen on ---
 
-async function requestWakeLock() {
+// The Screen Wake Lock API only exists in a secure context, so it is missing when
+// the viewer is opened over plain http on the LAN. iOS doesn't auto-lock while
+// a video is playing, so a tiny muted looping video stands in for it there.
+const KEEP_AWAKE_VIDEO = "data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMqbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAB9AAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAlV0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAB9AAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAfQAAAAAAABAAAAAAHNbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAgABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABeG1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAThzdGJsAAAAuHN0c2QAAAAAAAAAAQAAAKhhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFUxhdmM2Mi4xMS4xMDAgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAALmF2Y0MBQsAe/+EAFmdCwB7ZHsBEAAADAAQAAAMACDxYuSABAAVoy4PEyAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAAApQAAAAAAAAABhzdHRzAAAAAAAAAAEAAAACAABAAAAAABRzdHNzAAAAAAAAAAEAAAABAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAACAAAAAQAAABxzdHN6AAAAAAAAAAAAAAACAAACiQAAAAsAAAAUc3RjbwAAAAAAAAABAAADWgAAAGF1ZHRhAAAAWW1ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAALGlsc3QAAAAkqXRvbwAAABxkYXRhAAAAAQAAAABMYXZmNjIuMy4xMDAAAAAIZnJlZQAAApxtZGF0AAACcgYF//9u3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMiBiMzU2MDVhIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTAgcmVmPTMgZGVibG9jaz0xOi0zOi0zIGFuYWx5c2U9MHgxOjB4MTExIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0yLjAwOjAuNzAgbWl4ZWRfcmVmPTEgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0wIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS00IHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0wIGtleWludD0yNTAga2V5aW50X21pbj0xIHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByY19sb29rYWhlYWQ9NDAgcmM9Y3JmIG1idHJlZT0xIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTE6MS4yMACAAAAAD2WIhAXzn///D0UAAVefgAAAAAdBmjgL5zqA";
+let wakeLock = null;
+let keepAwakeVideo = null;
+
+async function keepScreenOn() {
+    if (document.hidden) return;
     if ("wakeLock" in navigator) {
+        if (wakeLock && !wakeLock.released) return;
         try {
-            await navigator.wakeLock.request("screen");
+            wakeLock = await navigator.wakeLock.request("screen");
+            return;
         } catch (err) {
-            console.warn("Wake lock failed:", err);
+            console.warn("Wake lock failed, falling back to video:", err);
         }
     }
+    if (!keepAwakeVideo) {
+        keepAwakeVideo = document.createElement("video");
+        keepAwakeVideo.src = KEEP_AWAKE_VIDEO;
+        keepAwakeVideo.muted = true;
+        keepAwakeVideo.loop = true;
+        keepAwakeVideo.playsInline = true;
+        keepAwakeVideo.setAttribute("playsinline", "");
+        keepAwakeVideo.setAttribute("aria-hidden", "true");
+        keepAwakeVideo.style.cssText = "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;";
+        document.body.appendChild(keepAwakeVideo);
+    }
+    keepAwakeVideo.play().catch((err) => console.warn("Keep-awake video failed:", err));
 }
+
+// The browser drops the wake lock whenever the page is hidden; take it again.
+document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && $("#enter-screen").style.display === "none") keepScreenOn();
+});
 
 // --- Picture-in-Picture ---
 
@@ -1383,9 +1441,9 @@ if ("documentPictureInPicture" in window) {
     });
 }
 
-// When returning to the tab, catch up to what is playing now. Background tabs
-// freeze requestAnimationFrame, so an in-flight karaoke animation leaves
-// animationId stuck non-null and the render queue stalls until the next message.
+// When returning to the tab, catch up to what is playing now. Timers in a
+// frozen tab leave the karaoke timer stuck, and the render queue stalls until
+// the next message.
 document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
 
@@ -1393,6 +1451,8 @@ document.addEventListener("visibilitychange", () => {
     if (state.audioCtx && state.audioCtx.state !== "running" && state.audioCtx.state !== "closed") {
         state.audioCtx.resume().catch(() => {});
     }
+
+    if (state.reconnectTimer) reconnectIfDown();
 
     // Messages stopped while hidden: the page was frozen and the socket is
     // holding a backlog of stale audio. Start again from live instead.
@@ -1403,7 +1463,7 @@ document.addEventListener("visibilitychange", () => {
     }
 
     // Tear down any frozen animation/timer so the render loop can restart.
-    if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
+    if (animationId) { clearTimeout(animationId); animationId = null; }
     if (showTimer) { clearTimeout(showTimer); showTimer = null; }
 
     // Show the newest line that is already due. Later ones stay queued for
@@ -1471,6 +1531,6 @@ $("#enter-btn").addEventListener("click", async () => {
     $("#app").style.display = "flex";
 
     connect();
-    requestWakeLock();
+    keepScreenOn();
     loadOutputDevices();
 });
