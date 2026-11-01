@@ -478,6 +478,45 @@ body {
     text-shadow: 0 0 16px var(--translation-active);
 }
 
+/* Focus view: the column stays laid out as in flow view, but only the row
+   being spoken is visible. A new row fades in at once and the old one
+   disappears, with no scrolling in between. */
+#interlinear.focus .il-unit {
+    opacity: 1;
+    animation: none;
+}
+
+#interlinear.focus .il-pair {
+    opacity: 0;
+    transition: none;
+}
+
+#interlinear.focus .il-pair.il-now,
+#interlinear.focus .il-unit.il-current.il-whole:not(.il-stream) .il-pair {
+    opacity: 1;
+    transition: opacity 0.15s ease-out;
+}
+
+#interlinear.focus.show-prev:not(.browsing) .il-pair.il-was {
+    opacity: 0.2;
+}
+
+#interlinear.focus.show-next:not(.browsing) .il-pair.il-now ~ .il-pair,
+#interlinear.focus.show-next:not(.browsing) .il-unit.il-current ~ .il-unit .il-pair {
+    opacity: 0.3;
+    transition: opacity 0.15s ease-out;
+}
+
+/* Dragging opens the history. */
+#interlinear.focus.browsing .il-pair {
+    opacity: 0.8;
+    transition: opacity 0.2s ease;
+}
+
+#interlinear.focus.browsing .il-pair.il-now {
+    opacity: 1;
+}
+
 #il-live {
     position: absolute;
     left: 50%;

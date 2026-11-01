@@ -37,6 +37,10 @@ const state = {
     // French on top with the smaller English under it: the top line gets read
     // first and longest, so this keeps the eye on the French.
     trPosition: localStorage.getItem("coucou-tr-position") === "above" ? "above" : "below",
+    // Focus shows only the row being spoken; flow shows the scrolling column.
+    ilView: localStorage.getItem("coucou-il-view") === "flow" ? "flow" : "focus",
+    showPrevLine: localStorage.getItem("coucou-show-prev") === "true",
+    showNextLines: localStorage.getItem("coucou-show-next") === "true",
     targetLanguage: "en",
 };
 
@@ -415,6 +419,7 @@ const il = {
     current: null,   // utterance being spoken
     partial: false,  // current is a partial still being streamed
     focus: null,     // row being spoken, held in the middle of the screen
+    was: null,       // row spoken just before it
     browsing: false, // reader has scrolled away from the live line
     touching: false,
     resumeTimer: null,
@@ -554,6 +559,22 @@ function ilSetFocus(el) {
     if (il.focus) il.focus.classList.remove("il-now");
     il.focus = el || null;
     if (el && el.classList.contains("il-pair")) el.classList.add("il-now");
+    // The row just before the focus, which focus view can show faintly above it.
+    // Found by position because a streamed line is rebuilt on every update.
+    if (il.was) il.was.classList.remove("il-was");
+    il.was = null;
+    if (el) {
+        const unit = el.classList.contains("il-pair") ? el.parentElement : el;
+        let prev = el.classList.contains("il-pair") ? el.previousElementSibling : null;
+        if (!prev && unit.previousElementSibling) {
+            const pairs = unit.previousElementSibling.querySelectorAll(".il-pair");
+            prev = pairs[pairs.length - 1] || null;
+        }
+        if (prev) {
+            prev.classList.add("il-was");
+            il.was = prev;
+        }
+    }
     ilFollow();
 }
 
@@ -570,24 +591,26 @@ function ilFocusTop(scroller) {
     const top = r.top - scroller.getBoundingClientRect().top + scroller.scrollTop;
     let h = r.height;
     if (el.closest(".il-stream")) {
-        // A streamed row grows downwards when it wraps. Centre it on its first
-        // line so the wrap does not scroll the screen.
+        // A streamed row grows downwards when it wraps. Place it by a fixed
+        // one-line height so the wrap does not scroll the screen.
         const css = getComputedStyle(document.documentElement);
-        const oneLine = parseFloat(css.getPropertyValue("--subtitle-size")) * 1.2
+        h = parseFloat(css.getPropertyValue("--subtitle-size")) * 1.2
             + parseFloat(css.getPropertyValue("--translation-size")) * 1.4;
-        h = Math.min(h, oneLine);
     }
     if (h > view * 0.7) return top - view * 0.15;
     return top + h / 2 - view / 2;
 }
 
-function ilFollow(instant = false) {
+// Focus view jumps straight to the new row and fades it in; flow view scrolls.
+// Pass "auto" to jump or "smooth" to scroll regardless of the view.
+function ilFollow(how) {
     if (il.browsing) return;
+    const instant = how === "auto" || (how == null && state.ilView === "focus");
     const scroller = $("#il-scroll");
     const top = ilFocusTop(scroller);
     if (top == null) return;
     const target = Math.round(Math.max(0, Math.min(top, scroller.scrollHeight - scroller.clientHeight)));
-    if (!instant && Math.abs(target - il.followTarget) < 1) return;
+    if (how == null && Math.abs(target - il.followTarget) < 1) return;
     il.followTarget = target;
     scroller.scrollTo({ top: target, behavior: instant ? "auto" : "smooth" });
 }
@@ -647,13 +670,14 @@ function ilAddHistory(data) {
         ilSetPast(il.current);
         il.current = null;
         il.partial = false;
-        ilSetFocus(null);
     }
     built.unit.classList.add("il-past");
     track.insertBefore(built.unit, track.querySelector(".il-next"));
     $("#app").classList.add("il-has-content");
     ilPrune();
-    ilFollow();
+    // Until the next line plays, the newest of these is the one on show.
+    const pairs = built.unit.querySelectorAll(".il-pair");
+    ilSetFocus(pairs[pairs.length - 1]);
 }
 
 function ilShowPartial(text) {
@@ -678,6 +702,7 @@ function ilClear() {
     il.current = null;
     il.partial = false;
     il.focus = null;
+    il.was = null;
     il.followTarget = NaN;
     ilStopBrowsing();
     ilRoot().classList.remove("live", "idle");
@@ -711,7 +736,7 @@ function ilResume() {
     ilStopBrowsing();
     il.followTarget = NaN;
     ilPrune();
-    ilFollow();
+    ilFollow("smooth");
 }
 
 {
@@ -739,6 +764,9 @@ function ilApplyDisplayFlags() {
     root.classList.toggle("mono", !(state.translateEnabled && state.translateActive));
     root.classList.toggle("no-fr", !state.showOriginal && state.translateEnabled && state.translateActive);
     $("#app").classList.toggle("tr-above", state.trPosition === "above");
+    root.classList.toggle("focus", state.ilView === "focus");
+    root.classList.toggle("show-prev", state.showPrevLine);
+    root.classList.toggle("show-next", state.showNextLines);
 }
 
 function applyLayout(layout) {
@@ -752,7 +780,7 @@ function applyLayout(layout) {
 
 window.addEventListener("resize", () => {
     il.followTarget = NaN;
-    ilFollow(true);
+    ilFollow("auto");
 });
 
 function updateLangBar(detectedLang) {
@@ -1224,8 +1252,31 @@ trPositionEl.addEventListener("change", (e) => {
     localStorage.setItem("coucou-tr-position", state.trPosition);
     ilApplyDisplayFlags();
     il.followTarget = NaN;
-    ilFollow(true);
+    ilFollow("auto");
 });
+
+const ilViewEl = $("#il-view-select");
+ilViewEl.value = state.ilView;
+ilViewEl.addEventListener("change", (e) => {
+    state.ilView = e.target.value === "flow" ? "flow" : "focus";
+    localStorage.setItem("coucou-il-view", state.ilView);
+    ilApplyDisplayFlags();
+    il.followTarget = NaN;
+    ilFollow("auto");
+});
+
+for (const [id, key, prop] of [
+    ["#show-prev-toggle", "coucou-show-prev", "showPrevLine"],
+    ["#show-next-toggle", "coucou-show-next", "showNextLines"],
+]) {
+    const el = $(id);
+    el.checked = state[prop];
+    el.addEventListener("change", (e) => {
+        state[prop] = e.target.checked;
+        localStorage.setItem(key, e.target.checked ? "true" : "false");
+        ilApplyDisplayFlags();
+    });
+}
 
 const showOriginalEl = $("#show-original-toggle");
 showOriginalEl.checked = state.showOriginal;
