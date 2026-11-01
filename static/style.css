@@ -811,6 +811,43 @@ input[type="range"] {
     }
 }
 
+/* --- Tablet --- */
+
+/* Standalone home-screen mode draws under the status bar. */
+#settings-panel {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+}
+
+@media (min-width: 700px) and (pointer: coarse) {
+    #toolbar {
+        padding: 0.9rem 1.5rem;
+    }
+
+    .btn-icon {
+        padding: 0.6rem;
+    }
+
+    .btn-icon svg {
+        width: 22px;
+        height: 22px;
+    }
+
+    .volume-bar input[type="range"] {
+        width: 140px;
+    }
+
+    .status-stack span {
+        font-size: 0.8rem;
+    }
+
+    #translate-bar,
+    .lang-toggle,
+    #target-lang {
+        font-size: 1rem;
+    }
+}
+
 /* --- Theme swatches --- */
 
 .theme-swatches {
