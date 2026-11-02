@@ -153,6 +153,13 @@ SEND_HIGH_WATER = 2**15
 # how much stale audio can queue up for a tab that stops reading, such as an
 # iPad tab in the background.
 VIEWER_SNDBUF = 96 * 1024
+# A viewer that does not answer a ping in time has its connection cut. The
+# websockets keepalive is not used for viewers because it closes gracefully,
+# which waits to flush unsent audio to a peer that has left the network and so
+# keeps the connection for minutes.
+VIEWER_PING_INTERVAL = 2
+VIEWER_PING_TIMEOUT = 4
+PONG = json.dumps({"type": "pong"})
 
 
 def _try_send(client, msg):
@@ -173,6 +180,24 @@ async def send_to_viewers(clients, msg):
     sends = [s for s in (_try_send(c, msg) for c in list(clients)) if s is not None]
     if sends:
         await asyncio.gather(*sends, return_exceptions=True)
+
+
+async def _ping(websocket):
+    pong_waiter = await websocket.ping()
+    await pong_waiter
+
+
+async def drop_when_unresponsive(websocket, interval=VIEWER_PING_INTERVAL, timeout=VIEWER_PING_TIMEOUT):
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.wait_for(_ping(websocket), timeout)
+        except asyncio.TimeoutError:
+            log.info("Viewer stopped answering pings, dropping it")
+            websocket.transport.abort()
+            return
+        except websockets.exceptions.ConnectionClosed:
+            return
 
 # --- Settings persistence ---
 
@@ -990,41 +1015,45 @@ async def handle_websocket(websocket):
         except OSError as e:
             log.debug(f"Could not set viewer send buffer: {e}")
     log.info(f"Client connected ({len(connected_clients)} total)")
-
-    # Send settings
-    await websocket.send(json.dumps({
-        "type": "settings",
-        "audio_delay": pipeline["audio_delay"],
-        "chunk_seconds": pipeline["chunk_seconds"],
-        "overlap_seconds": pipeline["overlap_seconds"],
-        "target_language": client_state[websocket]["target_language"],
-        "translate_enabled": pipeline.get("translate_enabled", True) and pipeline.get("translator") is not None,
-    }))
-
-    # Send current pipeline state so reconnecting clients show the right UI
-    status_msg = _viewer_status_msg()
-    log.debug(f"Sending status to new client: {status_msg['status']} (running={pipeline['running']}, active={len(active_clients)})")
-    await websocket.send(json.dumps(status_msg))
-    if pipeline["running"]:
-        active_clients.add(websocket)
-        log.debug(f"Added client to active_clients ({len(active_clients)} active)")
-        # Replay recent subtitles so the client shows the lines matching the
-        # buffered audio it's about to hear (client syncs them by stream time).
-        tl = client_state[websocket]["target_language"]
-        for item in pipeline.get("subtitle_history", []):
-            translations = item.get("translations", {})
-            await websocket.send(json.dumps({
-                **item,
-                "translation": translations.get(tl),
-                "target_language": tl,
-                "translations": None,
-                "replay": True,
-            }))
-
+    watchdog = asyncio.create_task(drop_when_unresponsive(websocket))
     try:
+        # Send settings
+        await websocket.send(json.dumps({
+            "type": "settings",
+            "audio_delay": pipeline["audio_delay"],
+            "chunk_seconds": pipeline["chunk_seconds"],
+            "overlap_seconds": pipeline["overlap_seconds"],
+            "target_language": client_state[websocket]["target_language"],
+            "translate_enabled": pipeline.get("translate_enabled", True) and pipeline.get("translator") is not None,
+        }))
+
+        # Send current pipeline state so reconnecting clients show the right UI
+        status_msg = _viewer_status_msg()
+        log.debug(f"Sending status to new client: {status_msg['status']} (running={pipeline['running']}, active={len(active_clients)})")
+        await websocket.send(json.dumps(status_msg))
+        if pipeline["running"]:
+            active_clients.add(websocket)
+            log.debug(f"Added client to active_clients ({len(active_clients)} active)")
+            # Replay recent subtitles so the client shows the lines matching the
+            # buffered audio it's about to hear (client syncs them by stream time).
+            tl = client_state[websocket]["target_language"]
+            for item in pipeline.get("subtitle_history", []):
+                translations = item.get("translations", {})
+                await websocket.send(json.dumps({
+                    **item,
+                    "translation": translations.get(tl),
+                    "target_language": tl,
+                    "translations": None,
+                    "replay": True,
+                }))
+
         async for message in websocket:
             data = json.loads(message)
-            if data.get("type") == "config":
+            if data.get("type") == "ping":
+                send = _try_send(websocket, PONG)
+                if send is not None:
+                    await send
+            elif data.get("type") == "config":
                 if "target_language" in data:
                     cs = client_state.get(websocket, {})
                     cs["target_language"] = data["target_language"]
@@ -1034,6 +1063,7 @@ async def handle_websocket(websocket):
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
+        watchdog.cancel()
         connected_clients.discard(websocket)
         active_clients.discard(websocket)
         client_state.pop(websocket, None)
@@ -1219,6 +1249,7 @@ async def main():
         host,
         port,
         process_request=handle_http,
+        ping_interval=None,
     ) as viewer_server:
         async with serve(
             handle_admin_websocket,

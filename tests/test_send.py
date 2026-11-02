@@ -78,3 +78,41 @@ def test_a_stalled_client_does_not_hold_up_the_others(server):
     stalled, healthy = FakeClient(buffered=10 * 2**15), FakeClient()
     asyncio.run(asyncio.wait_for(server.send_to_viewers([stalled, healthy], FRAME), timeout=1))
     assert healthy.sent == [FRAME]
+
+
+class PingClient:
+    def __init__(self, behaviour):
+        self.behaviour = behaviour
+        self.transport = types.SimpleNamespace(aborted=False)
+        self.transport.abort = lambda: setattr(self.transport, "aborted", True)
+
+    async def ping(self):
+        if self.behaviour == "closed":
+            from websockets.exceptions import ConnectionClosedError
+            raise ConnectionClosedError(None, None)
+        if self.behaviour == "send-stuck":
+            await asyncio.Event().wait()
+        pong = asyncio.get_running_loop().create_future()
+        if self.behaviour == "answers":
+            pong.set_result(0.001)
+        return pong
+
+
+async def _watch(server, client, run_for):
+    task = asyncio.create_task(server.drop_when_unresponsive(client, interval=0.01, timeout=0.05))
+    await asyncio.wait([task], timeout=run_for)
+    finished = task.done()
+    task.cancel()
+    return finished
+
+
+@pytest.mark.parametrize("behaviour, aborted, finished", [
+    ("answers", False, False),
+    ("closed", False, True),
+    ("no-pong", True, True),
+    ("send-stuck", True, True),
+])
+def test_drops_a_viewer_that_stops_answering_pings(server, behaviour, aborted, finished):
+    client = PingClient(behaviour)
+    assert asyncio.run(_watch(server, client, run_for=0.3)) is finished
+    assert client.transport.aborted is aborted

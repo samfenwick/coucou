@@ -969,6 +969,18 @@ const FREEZE_GAP_MS = 2000;
 let lastMessageAt = 0;
 let lastResyncAt = 0;
 
+// When the iPad moves to another Wi-Fi access point the socket can die without
+// a close event and stay open for minutes. The server answers every ping, so a
+// ping left unanswered this long means the connection is gone.
+const PING_INTERVAL_MS = 1000;
+const PING_TIMEOUT_MS = 4000;
+// Safari can wait a minute or more on a connection attempt whose packets were
+// lost mid-roam.
+const CONNECT_TIMEOUT_MS = 3000;
+const RECONNECT_MAX_MS = 2000;
+let connectStartedAt = 0;
+let unansweredPingSince = 0;
+
 function connect() {
     if (state.reconnectTimer) { clearTimeout(state.reconnectTimer); state.reconnectTimer = null; }
     const old = state.ws;
@@ -981,6 +993,8 @@ function connect() {
     ws.binaryType = "arraybuffer";
     state.ws = ws;
     lastMessageAt = 0;
+    connectStartedAt = performance.now();
+    unansweredPingSince = 0;
 
     ws.addEventListener("open", () => {
         if (ws !== state.ws) return;
@@ -995,6 +1009,7 @@ function connect() {
         const now = performance.now();
         const gap = lastMessageAt ? now - lastMessageAt : 0;
         lastMessageAt = now;
+        unansweredPingSince = 0;
         if (gap > FREEZE_GAP_MS && state.capturing && state.audioBroadcast) {
             resync();
             return;
@@ -1035,7 +1050,7 @@ function connect() {
 function scheduleReconnect() {
     if (state.reconnectTimer) return;
     const delay = state.reconnectDelay;
-    state.reconnectDelay = Math.min(state.reconnectDelay * 2, 8000);
+    state.reconnectDelay = Math.min(state.reconnectDelay * 2, RECONNECT_MAX_MS);
     state.reconnectTimer = setTimeout(() => {
         state.reconnectTimer = null;
         connect();
@@ -1064,6 +1079,30 @@ function reconnectIfDown() {
     }
 }
 window.addEventListener("online", () => { if (state.reconnectTimer || state.ws) reconnectIfDown(); });
+
+// Skipped while hidden: timers there are frozen or throttled, and the
+// visibility handler checks the connection on the way back.
+function checkConnection() {
+    const ws = state.ws;
+    if (!ws || document.hidden) return;
+    const now = performance.now();
+    if (ws.readyState === WebSocket.CONNECTING) {
+        if (now - connectStartedAt > CONNECT_TIMEOUT_MS) connect();
+        return;
+    }
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (unansweredPingSince && now - unansweredPingSince > PING_TIMEOUT_MS) {
+        $("#connection-status").textContent = "Disconnected";
+        $("#connection-status").classList.remove("connected");
+        state.capturing = false;
+        lastResyncAt = 0;
+        resync();
+        return;
+    }
+    if (!unansweredPingSince) unansweredPingSince = now;
+    try { ws.send('{"type":"ping"}'); } catch (e) {}
+}
+setInterval(checkConnection, PING_INTERVAL_MS);
 
 
 function handleStatus(data) {
@@ -1702,6 +1741,9 @@ document.addEventListener("visibilitychange", () => {
     }
 
     if (state.reconnectTimer) reconnectIfDown();
+    // Pings were not sent while hidden, so start the timeout afresh.
+    unansweredPingSince = 0;
+    checkConnection();
 
     // Messages stopped while hidden: the page was frozen and the socket is
     // holding a backlog of stale audio. Start again from live instead.
